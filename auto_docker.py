@@ -11490,6 +11490,26 @@ if __name__ == '__main__':
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(Tests)
     outcome = unittest.TextTestRunner(verbosity=2).run(suite)
+    if not outcome.wasSuccessful():
+        print("\n" + "=" * 80, file=sys.stderr)
+        print("REGRESSION SUITE FAILED — DETAILED FAILURE LIST:", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        for test, trace in outcome.failures:
+            print(f"\n[FAILURE] {test.id()}:\n{trace}", file=sys.stderr)
+        for test, trace in outcome.errors:
+            print(f"\n[ERROR] {test.id()}:\n{trace}", file=sys.stderr)
+        print("=" * 80 + "\n", file=sys.stderr)
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            try:
+                with open(summary_path, "a", encoding="utf-8") as sf:
+                    sf.write(f"### Regression Test Failures on {sys.platform} (Python {sys.version.split()[0]})\n\n")
+                    for test, trace in outcome.failures:
+                        sf.write(f"#### FAILURE: `{test.id()}`\n```\n{trace}\n```\n")
+                    for test, trace in outcome.errors:
+                        sf.write(f"#### ERROR: `{test.id()}`\n```\n{trace}\n```\n")
+            except Exception:
+                pass
     return outcome.wasSuccessful()
 
 
