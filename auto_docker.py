@@ -5770,11 +5770,12 @@ class Console:
             if not valid:
                 raise OpsError("Generated files did not pass integrity checks.")
             print("Generated file integrity: OK")
-            if shutil.which("docker"):
+            probe = DockerHostProbe.probe(context=self.settings.docker_context)
+            if probe.compose_available:
                 DockerAdapter(self.settings.target.root, self.settings.docker_context).run("check")
                 print("Docker Compose syntax: OK")
             else:
-                print("Docker unavailable: Compose syntax check skipped, not passed.")
+                print("Docker Compose unavailable: Compose syntax check skipped, not passed.")
             return True
         if name in {"build", "up", "run", "job", "down", "ps", "logs", "verify", "dryrun", "diagnose"}:
             if not self.settings:
@@ -7732,7 +7733,8 @@ def self_test() -> bool:
             path = self.root / ".opsforge.lock"
             path.touch()
             console = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
-            with patch("sys.stdout", new_callable=io.StringIO) as output:
+            with patch("shutil.which", return_value=None), \
+                 patch("sys.stdout", new_callable=io.StringIO) as output:
                 console.execute("mode genaiops")
                 console.execute("deps infer")
                 console.execute("generate YES")
@@ -11830,11 +11832,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.action == "check":
             print("Generated files: verified")
-            if shutil.which("docker"):
+            probe = DockerHostProbe.probe(context=settings.docker_context)
+            if probe.compose_available:
                 DockerAdapter(settings.target.root, settings.docker_context).run("check")
                 print("Docker Compose: verified")
             else:
-                print("Docker unavailable: Compose syntax NOT checked")
+                print("Docker Compose unavailable: Compose syntax NOT checked")
             return 0
         if args.action in {"build", "up", "run", "job", "dryrun"}:
             if args.action in {'up', 'run', 'job'}:
