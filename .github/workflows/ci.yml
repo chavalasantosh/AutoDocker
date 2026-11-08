@@ -1,4 +1,4 @@
-name: Auto Docker CI
+name: Auto Docker Production CI
 
 on:
   push:
@@ -6,26 +6,90 @@ on:
   pull_request:
     branches: [ main ]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  syntax-and-sanity:
+    name: Syntax & Sanity Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify Python AST & Bytecode Compilation
+        run: |
+          python -m py_compile auto_docker.py
+
+      - name: Verify Single-File Executable Imports
+        run: |
+          python -c "import auto_docker; print('Auto Docker Version:', auto_docker.VERSION)"
+
+      - name: Lint for Critical Syntax & Undefined Names
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8
+          # Stop build if there are Python syntax errors or undefined names
+          flake8 auto_docker.py --count --select=E9,F63,F7,F82 --show-source --statistics
+
+  test-matrix:
+    name: Regression Suite (${{ matrix.os }} / Py ${{ matrix.python-version }})
+    needs: syntax-and-sanity
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
 
-    - name: Compile Syntax & AST Verification
-      run: |
-        python -m py_compile auto_docker.py
+      - name: Run Auto Docker 330-Test Regression Suite
+        run: |
+          python auto_docker.py self-test
 
-    - name: Run Auto Docker Regression Suite
-      run: |
-        python auto_docker.py self-test
+  cli-smoke-tests:
+    name: CLI End-to-End Smoke Validation
+    needs: syntax-and-sanity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify CLI Help & Version
+        run: |
+          python auto_docker.py --help
+          python auto_docker.py doctor
+
+      - name: Test End-to-End Generation & Inspection Lifecycle
+        run: |
+          mkdir -p /tmp/test_project
+          cat << 'EOF' > /tmp/test_project/app.py
+          import os
+          print("Hello from test container app")
+          EOF
+          cat << 'EOF' > /tmp/test_project/requirements.txt
+          # Standard project
+          EOF
+          python auto_docker.py inspect /tmp/test_project
+          python auto_docker.py generate /tmp/test_project
+          python auto_docker.py check /tmp/test_project
+          python auto_docker.py preview /tmp/test_project

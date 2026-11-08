@@ -1,0 +1,56 @@
+name: Auto Docker Release & Packaging
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-release:
+    name: Build, Verify & Publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify Full Test Suite Gate
+        run: |
+          python auto_docker.py self-test
+
+      - name: Install Build Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build wheel
+
+      - name: Build Wheel and Source Distribution
+        run: |
+          python -m build
+
+      - name: Stage Release Artifacts
+        run: |
+          mkdir -p release_artifacts
+          cp auto_docker.py release_artifacts/auto_docker.py
+          cp dist/* release_artifacts/
+          cd release_artifacts
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          cd ..
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            release_artifacts/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
