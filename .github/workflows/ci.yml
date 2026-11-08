@@ -90,6 +90,6 @@ jobs:
           # Standard project
           EOF
           python auto_docker.py inspect /tmp/test_project
-          python auto_docker.py generate /tmp/test_project
+          python auto_docker.py generate /tmp/test_project --yes
           python auto_docker.py check /tmp/test_project
           python auto_docker.py preview /tmp/test_project

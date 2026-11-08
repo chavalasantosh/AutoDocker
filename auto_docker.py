@@ -1020,10 +1020,13 @@ class DependencyAudit:
             declared_fallback: set[str] = set()
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
+                for m in re.finditer(r"(?:dependencies|requires)\s*=\s*\[(.*?)\]", text, re.DOTALL):
+                    for item in re.finditer(r"""['"]([a-zA-Z][a-zA-Z0-9_.-]*)""", m.group(1)):
+                        declared_fallback.add(_distribution_key(item.group(1)))
                 in_deps = False
                 for raw in text.splitlines():
                     line = raw.strip()
-                    if re.search(r"^\s*\[(?:project\.dependencies|tool\.poetry\.dependencies)\]", line) or "dependencies = [" in line:
+                    if re.search(r"^\s*\[(?:project\.dependencies|tool\.poetry\.dependencies)\]", line):
                         in_deps = True
                         continue
                     if in_deps:
@@ -1031,9 +1034,9 @@ class DependencyAudit:
                             in_deps = False
                             continue
                         m = re.match(r"^[\"']?([a-zA-Z][a-zA-Z0-9_.-]*)", line)
-                        if m:
+                        if m and m.group(1).lower() != "python":
                             declared_fallback.add(_distribution_key(m.group(1)))
-                return declared_fallback, []
+                return declared_fallback, ["tomllib not available (Python < 3.11); pyproject.toml parsed with best-effort fallback"]
             except Exception as exc:
                 return set(), [f"Unable to parse pyproject.toml: {exc}"]
         except (OSError, ValueError) as exc:
@@ -6731,6 +6734,15 @@ class ResourceCleaner:
     @classmethod
     def execute(cls, plan: CleanupPlan, prefix: list[str] | None = None) -> CleanupResult:
         """Executes the cleanup plan authoritatively, verifying actual deletion of every resource."""
+        if not (plan.containers or plan.networks or plan.images or plan.volumes):
+            return CleanupResult(
+                success=True,
+                cleaned=(),
+                failed=(),
+                leftovers=(),
+                message="Successfully cleaned 0 resources."
+            )
+
         cleaned: list[CleanableResource] = []
         failed: list[tuple[CleanableResource, str]] = []
 
@@ -7208,6 +7220,12 @@ def self_test() -> bool:
             self.root.mkdir()
             (self.root / "localllmchat.py").write_text("import ollama\nif __name__ == '__main__':\n print('ok')\n")
 
+        def _safe_symlink(self, link_path: Path, target_path: Path, target_is_directory: bool = False) -> None:
+            try:
+                link_path.symlink_to(target_path, target_is_directory=target_is_directory)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"Symlinks not supported in this environment: {exc}")
+
         def config(self, mode: Mode = Mode.BASE, gpu: bool = False) -> tuple[Plan, dict[str, str]]:
             p = Planner().build(Settings(target_for(str(self.root / "localllmchat.py")), mode=mode, gpu=gpu),
                                 Inspector().inspect(target_for(str(self.root / "localllmchat.py"))))
@@ -7244,7 +7262,7 @@ def self_test() -> bool:
             foreign = Path(self.tmp.name) / "elsewhere"
             foreign.mkdir()
             (foreign / "app.py").write_text("x=1")
-            (self.root / "outside").symlink_to(foreign, target_is_directory=True)
+            self._safe_symlink(self.root / "outside", foreign, target_is_directory=True)
             found = _collect_python(self.root)
             self.assertNotIn(foreign / "app.py", found)
 
@@ -7296,7 +7314,7 @@ def self_test() -> bool:
         def test_output_symlink_refused_on_preview(self):
             foreign = Path(self.tmp.name) / "foreign"
             foreign.mkdir()
-            (self.root / OUTPUT).symlink_to(foreign, target_is_directory=True)
+            self._safe_symlink(self.root / OUTPUT, foreign, target_is_directory=True)
             with self.assertRaises(OpsError):
                 OutputManager(self.root).state(self.config()[1])
 
@@ -7806,7 +7824,7 @@ def self_test() -> bool:
 
         def test_broken_output_symlink_rejected(self):
             broken = self.root / "gone"
-            (self.root / OUTPUT).symlink_to(broken, target_is_directory=True)
+            self._safe_symlink(self.root / OUTPUT, broken, target_is_directory=True)
             with self.assertRaises(OpsError):
                 OutputManager(self.root).write(self.config()[1])
 
@@ -8201,7 +8219,7 @@ def self_test() -> bool:
         def test_dependency_audit_does_not_follow_external_helpers(self):
             outside = Path(self.tmp.name) / 'external.py'
             outside.write_text('import httpx\n')
-            (self.root / 'external.py').symlink_to(outside)
+            self._safe_symlink(self.root / 'external.py', outside)
             (self.root / 'localllmchat.py').write_text('import external\n')
             report = DependencyAudit().report(Inspector().inspect(target_for(str(self.root / 'localllmchat.py'))))
             self.assertNotIn('httpx', report.observed)
@@ -8678,8 +8696,8 @@ def self_test() -> bool:
             adapter = DockerAdapter(self.root)
             from subprocess import CompletedProcess
             with patch.object(DockerAdapter, '_compose_command', return_value=['fake-docker']), \
-                 patch('__main__._proof_ok'), \
-                 patch('__main__._proof_command', return_value=CompletedProcess([], 0, 'container123', '')):
+                 patch(f"{__name__}._proof_ok"), \
+                 patch(f"{__name__}._proof_command", return_value=CompletedProcess([], 0, 'container123', '')):
                 with self.assertRaisesRegex(OpsError, 'Cleanup failed'):
                     _cleanup_proof(adapter, self.root)
 
@@ -8739,7 +8757,7 @@ def self_test() -> bool:
             self.assertTrue(any('private.key' in item for item in messages))
 
         def test_rc3_context_scan_never_follows_symlink(self):
-            (self.root / 'external').symlink_to(Path(self.tmp.name))
+            self._safe_symlink(self.root / 'external', Path(self.tmp.name), target_is_directory=True)
             ok, messages = BuildContextSafety.scan(self.root, '')
             self.assertTrue(ok)
             self.assertTrue(any('symlink' in item for item in messages))
@@ -8793,8 +8811,8 @@ def self_test() -> bool:
             from subprocess import CompletedProcess
             adapter = DockerAdapter(self.root)
             with patch.object(DockerAdapter, '_compose_command', return_value=['fake-docker']), \
-                 patch('__main__._proof_ok'), \
-                 patch('__main__._proof_command', return_value=CompletedProcess([], 1, '', '')):
+                 patch(f"{__name__}._proof_ok"), \
+                 patch(f"{__name__}._proof_command", return_value=CompletedProcess([], 1, '', '')):
                 with self.assertRaisesRegex(OpsError, 'Cleanup failed'):
                     _cleanup_proof(adapter, self.root)
 
@@ -8802,7 +8820,7 @@ def self_test() -> bool:
             report = self.root / 'proof.json'
             destination = self.root / 'target.json'
             destination.write_text('safe')
-            report.symlink_to(destination)
+            self._safe_symlink(report, destination)
             evidence = ProofEvidence('unit', report)
             evidence.record('x', 'PASS', 'ok')
             with self.assertRaisesRegex(OpsError, 'symlink'):
@@ -8925,7 +8943,7 @@ def self_test() -> bool:
             self.assertEqual(json.loads(path.read_text())['overall'], 'FAIL')
 
         def test_rc3_model_service_pull_never_occurs_without_yes(self):
-            with patch('__main__._proof_engine', side_effect=AssertionError('must not contact Docker')):
+            with patch(f"{__name__}._proof_engine", side_effect=AssertionError('must not contact Docker')):
                 self.assertEqual(main(['ai-integration-test', '--model', 'tinyllama']), 2)
 
         def test_rc3_nested_ai_python_scripts_compile(self):
@@ -9057,7 +9075,7 @@ volumes:
             root = self.make_existing_repo()
             with self.assertRaises(OpsError):
                 ExistingInfrastructure.discover(root, '../wrong.yml')
-            (root / 'compose.yaml').symlink_to(root / 'docker-compose.yml')
+            self._safe_symlink(root / 'compose.yaml', root / 'docker-compose.yml')
             self.assertNotIn('compose.yaml', ExistingInfrastructure.discover(root).compose_files)
             with self.assertRaises(OpsError):
                 ExistingInfrastructure.discover(root,'compose.yaml')
@@ -9132,7 +9150,7 @@ volumes:
             (repo / 'compose.yaml').write_text('services:\n  api:\n    image: busybox\n')
             secrets = self.root / 'elsewhere.env'
             secrets.write_text('API_KEY=private\n')
-            (repo / '.env').symlink_to(secrets)
+            self._safe_symlink(repo / '.env', secrets)
             result = NativeReadiness.inspect(repo, disk_check=False)
             self.assertFalse(result.ready)
             self.assertTrue(any('symlink' in item for item in result.failures))
@@ -10849,7 +10867,8 @@ if __name__ == '__main__':
 
         def test_rc6_live_test_remote_context_unsupported(self):
             # 8. Remote Docker contexts are explicitly unsupported for live-test with clear message
-            with patch('sys.stderr', new_callable=io.StringIO) as err:
+            with patch('shutil.which', return_value=None), \
+                 patch('sys.stderr', new_callable=io.StringIO) as err:
                 ok = LiveAcceptanceTest.run(yes=True, context='remote-server')
                 self.assertFalse(ok)
                 self.assertIn("Remote Docker context 'remote-server' is unsupported for live-test", err.getvalue())
