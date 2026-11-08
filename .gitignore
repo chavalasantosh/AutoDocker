@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution & Packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environments & local env files
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test & coverage caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Auto Docker runtime generated directories
+.opsforge/
+.opsforge-backup-*/

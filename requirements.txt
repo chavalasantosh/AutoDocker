@@ -1,0 +1,2 @@
+# Auto Docker 3.0 requires only Python 3.10+ (Standard Library Only).
+# Zero external pip packages are needed to run auto_docker.py or its test suite.

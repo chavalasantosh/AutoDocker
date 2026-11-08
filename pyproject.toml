@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autodocker"
+version = "3.0.0-rc7"
+description = "Auto Docker: Autonomous, zero-dependency container infrastructure generator and deployment orchestrator"
+readme = "README.md"
+authors = [{ name = "Chavala Santosh", email = "santoshysc@gmail.com" }]
+license = { text = "Apache-2.0" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: System :: Systems Administration",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+auto-docker = "auto_docker:main"
+autodocker = "auto_docker:main"

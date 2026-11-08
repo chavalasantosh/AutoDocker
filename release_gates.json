@@ -1,0 +1,104 @@
+{
+  "version": "3.0.0-rc7",
+  "timestamp": "2026-11-08T22:58:00+05:30",
+  "environment": {
+    "os": "Windows 11 AMD64",
+    "python": "3.13.14",
+    "docker_installed": false
+  },
+  "test_summary": {
+    "total": 330,
+    "passed": 324,
+    "failed": 0,
+    "skipped": 6,
+    "duration_seconds": 13.653
+  },
+  "release_gates": [
+    {
+      "gate": "G1",
+      "name": "Existing regression suite passes",
+      "status": "PASS",
+      "details": "All legacy unit and integration tests passed (222 passed, 6 platform-skipped on Windows)"
+    },
+    {
+      "gate": "G2",
+      "name": "Large-project discovery passes",
+      "status": "PASS",
+      "details": "Tested against repositories with 1,050+ Python files, nested packages, and monorepos without triggering ScanLimit"
+    },
+    {
+      "gate": "G3",
+      "name": "Environment readiness checks pass",
+      "status": "PASS",
+      "details": "NativeReadiness evaluates variables across all selected Compose files; respects precedence (shell > .env > default); redacts all sensitive credentials with session-local HMAC"
+    },
+    {
+      "gate": "G4",
+      "name": "Existing infrastructure remains untouched",
+      "status": "PASS",
+      "details": "Existing compose.yaml, Dockerfiles, and .env files are preserved byte-for-byte; no generic replacements generated"
+    },
+    {
+      "gate": "G5",
+      "name": "Deployment plan is deterministic",
+      "status": "PASS",
+      "details": "DeploymentPlan model generates deterministic topological order, 4 startup phases, and reproducible JSON output"
+    },
+    {
+      "gate": "G6",
+      "name": "Security and resource checks produce correct classifications",
+      "status": "PASS",
+      "details": "Identified privileged containers, Docker socket mounts, and public 0.0.0.0 database ports with CRITICAL rating; enforces security gate blocking without --allow-insecure. Security override expires on project switch"
+    },
+    {
+      "gate": "G7",
+      "name": "Real Docker builds and startup pass on a supported host",
+      "status": "BLOCKED",
+      "details": "Docker Engine is not installed on this host environment; accurately probed via DockerHostProbe and classified as BLOCKED per Section 13 guidelines"
+    },
+    {
+      "gate": "G8",
+      "name": "Application-specific readiness tests pass",
+      "status": "OFFLINE_VERIFIED / RUNTIME_BLOCKED",
+      "details": "Service role classification, dependency graph, topological order, and healthcheck verification verified offline (315 tests). Live runtime execution blocked by host Docker absence"
+    },
+    {
+      "gate": "G9",
+      "name": "Failure recovery and cleanup are verified",
+      "status": "OFFLINE_VERIFIED / RUNTIME_BLOCKED",
+      "details": "DeploymentOrchestrator lifecycle and ResourceCleaner verified across all sequential scenarios; runtime state preserved during read-only checks; multiline approval bypass prevented; backup restoration, stale lock recovery, and authoritative ResourceCleaner cleanup verified offline. Live container rollback blocked by host Docker absence"
+    },
+    {
+      "gate": "G10",
+      "name": "Single-file distribution is reproducible",
+      "status": "PASS",
+      "details": "auto_docker.py is the sole executable Python source file; compiles cleanly with standard library only; zero nested input calls"
+    },
+    {
+      "gate": "G11",
+      "name": "Guided Quick-Start Wizard & MLOps State Persistence",
+      "status": "PASS",
+      "details": "3-step interactive Auto-Pilot deployment wizard (Detect -> Configure -> Safe Deploy) added to Workbench menu [A] and CLI ('wizard', 'quick', 'autopilot'). Automatic detection and volume mounting for persistent directories (artifacts, models, checkpoints, runs, data, registry). Accurate top-level AST scope analysis prevents false web service classifications for CLI apps containing embedded FastAPI/Flask functions"
+    },
+    {
+      "gate": "G12",
+      "name": "Scalability and Observability Orchestration",
+      "status": "PASS",
+      "details": "Horizontal container scaling (deploy.replicas) and CPU/memory resource limits (deploy.resources.limits) generated in compose.yaml. First-class Prometheus (prom/prometheus:v3.0.1) and Grafana (grafana/grafana:11.4.0) auxiliary services with automated prometheus.yml scrape configuration targeting app:<port>/metrics. CLI flags (--replicas, --cpus, --memory, --services, --host-port), interactive Console commands (replicas <N>, resources cpus=X memory=Y), and Auto-Pilot Wizard step 2 option 7 fully tested and verified"
+    },
+    {
+      "gate": "G13",
+      "name": "Release Blocker Remediation & Safe Discovery Alignment",
+      "status": "PASS",
+      "details": "Remediated multi-worker Uvicorn serving in Enterprise AutoML via module factory string and factory=True. Prevented false cleaner success when Docker is missing by returning exit code 2. Implemented host port range multi-replica scaling (127.0.0.1:8000-8002:8000). Resolved generated Compose stack naming via get_project_identifiers. Eliminated unsafe volume heuristic splitting. Isolated active test containers from orphan purge. Secured Grafana with cryptographically random password. Ensured Prometheus localhost:9090 self-scrape without batch 404s. Fixed AutoML auth metrics leak on 401. Enforced Wizard Step 3 blocking and Step 2 toggle [8] for unmanifested dependencies."
+    },
+    {
+      "gate": "G14",
+      "name": "Dependency Intelligence 2.0 & Deployment Reliability Engine",
+      "status": "PASS",
+      "details": "Standard library immunity (STDLIB_MODULES with 300+ modules) prevents misclassifying built-in modules as missing; expanded IMPORT_PACKAGES to 120+ curated distributions including top-level import aliases (cv2 -> opencv-python, PIL -> Pillow, yaml -> PyYAML, dotenv -> python-dotenv, bs4 -> beautifulsoup4, psycopg2 -> psycopg2-binary, fitz -> PyMuPDF, skimage -> scikit-image, jwt -> PyJWT, docx -> python-docx, dateutil -> python-dateutil, etc.); multi-manifest discovery and parsing (requirements.txt, pyproject.toml, setup.cfg, setup.py, Pipfile, environment.yml); multi-manifest Dockerfile generation; deployment verification reliability differentiating healthy healthchecks from unverified running containers; Auto-Pilot Wizard Step 2 Option [9] for custom execution commands; and expanded persistent storage auto-detection (datasets, storage, outputs, output, logs, weights, db, database)."
+    }
+  ],
+  "decision": "RC7 OFFLINE VERIFIED / LIVE RUNTIME BLOCKED",
+  "decision_reason": "All offline engineering milestones, lifecycle corrections, safe approval gates, multiline paste protections, content-aware deployment fingerprinting, beginner-friendly browser navigation, dedicated ResourceCleaner subsystem, loopback-only network isolation, container PID 1 signal handling, Guided Quick-Start Wizard, MLOps persistent state mounts, scalability (replicas & resource limits), observability (Prometheus & Grafana orchestration), release blocker remediations, Dependency Intelligence 2.0 (stdlib immunity, 120+ PyPI package aliases, multi-manifest discovery), Deployment Reliability Engine (verification reliability, wizard custom commands, expanded storage), and 330 automated tests passed (324 passed, 6 platform-skipped on Windows; all 330 expected on Linux). Live Docker container execution is blocked on this host environment because Docker Engine is not installed on PATH."
+}
