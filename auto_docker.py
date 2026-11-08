@@ -6092,7 +6092,7 @@ HTTPServer(('0.0.0.0', 8000), Handler).serve_forever()
             for cycle in range(repeat):
                 for name, source, kind in fixtures:
                     gate = f'{cycle+1}/{repeat}:{name}'
-                    root = Path(temporary) / f'cycle-{cycle+1}' / name
+                    root = (Path(temporary) / f'cycle-{cycle+1}' / name).resolve()
                     root.mkdir(parents=True)
                     (root / 'app.py').write_text(source, encoding='utf-8')
                     host_port = _free_local_port() if kind == 'web' else None
@@ -6159,7 +6159,7 @@ def ai_integration_test(model: str | None = None, pull: bool = False,
             evidence.record('docker-engine', 'BLOCKED', str(exc))
             raise
         with tempfile.TemporaryDirectory(prefix='auto-docker-ai-proof-') as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             (root / 'app.py').write_text("print('ai proof')\n", encoding='utf-8')
             mlport = _free_local_port()
             olport = _free_local_port()
@@ -7080,7 +7080,7 @@ class LiveAcceptanceTest:
             prefix += ["--context", context]
 
         with tempfile.TemporaryDirectory(prefix=f"auto-docker-live-{run_id}-") as tmpdir:
-            root = Path(tmpdir)
+            root = Path(tmpdir).resolve()
 
             # 1. Real, clean, deterministic Python HTTP test server with instant SIGTERM/SIGINT shutdown
             server_py_content = (
@@ -7217,7 +7217,7 @@ def self_test() -> bool:
         def setUp(self) -> None:
             self.tmp = tempfile.TemporaryDirectory()
             self.addCleanup(self.tmp.cleanup)
-            self.root = Path(self.tmp.name) / "my local llm"
+            self.root = (Path(self.tmp.name) / "my local llm").resolve()
             self.root.mkdir()
             (self.root / "localllmchat.py").write_text("import ollama\nif __name__ == '__main__':\n print('ok')\n")
 
@@ -10417,7 +10417,7 @@ if __name__ == '__main__':
         def test_rc6_live_test_files_and_build_context_exist(self):
             # 3. Dockerfile and build context actually exist
             with tempfile.TemporaryDirectory() as tmpdir:
-                root = Path(tmpdir)
+                root = Path(tmpdir).resolve()
                 (root / "server.py").write_text("print('test')\n", encoding="utf-8")
                 (root / "Dockerfile").write_text("FROM python:3.11-alpine\nCOPY server.py .\n", encoding="utf-8")
                 self.assertTrue((root / "server.py").is_file())
@@ -10497,7 +10497,7 @@ if __name__ == '__main__':
             # Negative test: failed compose down must cause cleanup to fail
             from subprocess import CompletedProcess
             with tempfile.TemporaryDirectory() as tmpdir:
-                root = Path(tmpdir)
+                root = Path(tmpdir).resolve()
                 (root / "compose.yaml").write_text("name: test\n", encoding="utf-8")
                 with patch.object(ResourceCleaner, '_run_docker') as mock_docker:
                     def fake_run(args, prefix=None, timeout=30):
@@ -10514,7 +10514,7 @@ if __name__ == '__main__':
             # Negative test: failed image removal (image still present in post-scan) must cause cleanup to fail
             from subprocess import CompletedProcess
             with tempfile.TemporaryDirectory() as tmpdir:
-                root = Path(tmpdir)
+                root = Path(tmpdir).resolve()
                 (root / "compose.yaml").write_text("name: test\n", encoding="utf-8")
                 with patch.object(ResourceCleaner, '_run_docker') as mock_docker:
                     def fake_run(args, prefix=None, timeout=30):
@@ -10532,7 +10532,7 @@ if __name__ == '__main__':
             # Negative test: failed container removal (rm exits non-zero) must cause cleanup to fail
             from subprocess import CompletedProcess
             with tempfile.TemporaryDirectory() as tmpdir:
-                root = Path(tmpdir)
+                root = Path(tmpdir).resolve()
                 (root / "compose.yaml").write_text("name: test\n", encoding="utf-8")
                 with patch.object(ResourceCleaner, '_run_docker') as mock_docker:
                     def fake_run(args, prefix=None, timeout=30):
@@ -10555,7 +10555,7 @@ if __name__ == '__main__':
             # Negative test: stopped/exited containers lingering in post-scan must cause cleanup to fail
             from subprocess import CompletedProcess
             with tempfile.TemporaryDirectory() as tmpdir:
-                root = Path(tmpdir)
+                root = Path(tmpdir).resolve()
                 (root / "compose.yaml").write_text("name: test\n", encoding="utf-8")
                 with patch.object(ResourceCleaner, '_run_docker') as mock_docker:
                     def fake_run(args, prefix=None, timeout=30):
@@ -10578,7 +10578,7 @@ if __name__ == '__main__':
             # Positive test: complete cleanup removes resources and verifies 0 leftovers
             from subprocess import CompletedProcess
             with tempfile.TemporaryDirectory() as tmpdir:
-                root = Path(tmpdir)
+                root = Path(tmpdir).resolve()
                 (root / "compose.yaml").write_text("name: test\n", encoding="utf-8")
                 call_counts = {"ps": 0}
                 with patch.object(ResourceCleaner, '_run_docker') as mock_docker:
@@ -10797,7 +10797,7 @@ if __name__ == '__main__':
         def test_rc6_console_cleaner_menu_navigation(self):
             # Interactive Console Option 12 enters cleaner UI and menu options 1, 2, 0 operate correctly
             with tempfile.TemporaryDirectory() as tmpdir:
-                root = Path(tmpdir)
+                root = Path(tmpdir).resolve()
                 con = Console(Settings(target_for(str(root))))
                 # Command "12" or "cleaner" opens cleaner menu
                 con.execute("12")
@@ -10895,7 +10895,7 @@ if __name__ == '__main__':
 
         def test_rc6_wizard_3_step_guided_flow(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "train.py").write_text("import time\nprint('Training...')\n")
                 (repo / "artifacts").mkdir()
                 con = Console(Settings(target_for(str(repo))))
@@ -10938,7 +10938,7 @@ if __name__ == '__main__':
 
         def test_rc6_wizard_step2_toggle_options(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "app.py").write_text("print('hello')\n")
                 con = Console(Settings(target_for(str(repo))))
                 con.render_wizard()
@@ -10985,7 +10985,7 @@ if __name__ == '__main__':
 
         def test_rc6_top_level_app_vs_nested_function_detection(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 # Subcase 1: True top-level FastAPI
                 api_file = repo / "fastapi_top.py"
                 api_file.write_text("from fastapi import FastAPI\napp = FastAPI()\n")
@@ -11021,7 +11021,7 @@ if __name__ == '__main__':
 
         def test_rc6_mlops_persistent_directories_discovery_and_mounting(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "automl.py").write_text("print('AutoML running')\n")
                 (repo / "artifacts").mkdir()
                 (repo / "models").mkdir()
@@ -11043,7 +11043,7 @@ if __name__ == '__main__':
 
         def test_rc6_wizard_cli_actions(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "main.py").write_text("print('ready')\n")
                 # Invoke main with 'wizard'
                 with patch.object(Console, 'loop', return_value=None) as mock_loop:
@@ -11062,7 +11062,7 @@ if __name__ == '__main__':
 
         def test_rc6_scalability_replicas_and_resource_limits(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "app.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
                 target = target_for(str(repo / "app.py"))
                 settings = Settings(target, replicas=3, cpus="1.5", memory="1G")
@@ -11100,7 +11100,7 @@ if __name__ == '__main__':
 
         def test_rc6_observability_prometheus_and_grafana_services(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "app.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
                 target = target_for(str(repo / "app.py"))
                 settings = Settings(target, services_override=("prometheus", "grafana"), port=8000)
@@ -11142,7 +11142,7 @@ if __name__ == '__main__':
 
         def test_rc6_wizard_step2_scalability_toggle(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "app.py").write_text("print('hello')\n")
                 con = Console(Settings(target_for(str(repo))))
                 con.render_wizard()
@@ -11159,7 +11159,7 @@ if __name__ == '__main__':
 
         def test_pass9_replica_port_range_scaling(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "app.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
                 target = target_for(str(repo / "app.py"))
 
@@ -11178,7 +11178,7 @@ if __name__ == '__main__':
 
         def test_pass9_observability_grafana_password_and_prometheus_self_scrape(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "app.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
                 target = target_for(str(repo / "app.py"))
                 settings = Settings(target, services_override=("prometheus", "grafana"), port=8000)
@@ -11221,7 +11221,7 @@ if __name__ == '__main__':
 
         def test_pass9_cleaner_opsforge_project_slug_resolution(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir) / "demo-ml-service"
+                repo = (Path(tmpdir) / "demo-ml-service").resolve()
                 repo.mkdir()
                 (repo / "app.py").write_text("print('hello')\n")
 
@@ -11286,7 +11286,7 @@ if __name__ == '__main__':
 
         def test_pass9_wizard_unmanifested_dependencies_blocking_and_resolution(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 # App with external imports (fastapi, joblib, numpy) but no requirements.txt
                 (repo / "app.py").write_text("import fastapi\nimport joblib\nimport numpy\nprint('ml')\n")
                 con = Console(Settings(target_for(str(repo / "app.py"))))
@@ -11331,7 +11331,7 @@ if __name__ == '__main__':
 
         def test_rc7_stdlib_immunity_never_missing(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 code = (
                     "import json\nimport sqlite3\nimport pathlib\nimport logging\n"
                     "import dataclasses\nimport argparse\nimport sys\nimport os\n"
@@ -11348,7 +11348,7 @@ if __name__ == '__main__':
 
         def test_rc7_pypi_alias_resolution(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 code = (
                     "import cv2\nfrom PIL import Image\nimport yaml\nfrom dotenv import load_dotenv\n"
                     "from bs4 import BeautifulSoup\nimport psycopg2\nimport fitz\nfrom skimage import io\n"
@@ -11378,7 +11378,7 @@ if __name__ == '__main__':
 
         def test_rc7_multi_manifest_discovery_setup_cfg(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "setup.cfg").write_text("[options]\ninstall_requires =\n    fastapi\n    requests\n    pydantic\n")
                 (repo / "app.py").write_text("import fastapi\nimport requests\nimport pydantic\n")
                 self.assertEqual(_deps(repo), "setup.cfg")
@@ -11399,7 +11399,7 @@ if __name__ == '__main__':
 
         def test_rc7_multi_manifest_discovery_pipfile(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "Pipfile").write_text("[packages]\nfastapi = \"*\"\nhttpx = \"*\"\n")
                 (repo / "app.py").write_text("import fastapi\nimport httpx\n")
                 self.assertEqual(_deps(repo), "Pipfile")
@@ -11417,7 +11417,7 @@ if __name__ == '__main__':
 
         def test_rc7_multi_manifest_discovery_environment_yml(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "environment.yml").write_text("name: ml_env\ndependencies:\n  - python=3.11\n  - numpy\n  - pandas\n")
                 (repo / "app.py").write_text("import numpy\nimport pandas\n")
                 self.assertEqual(_deps(repo), "environment.yml")
@@ -11431,7 +11431,7 @@ if __name__ == '__main__':
 
         def test_rc7_expanded_persistent_storage_detection(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 for folder in ("datasets", "storage", "outputs", "logs", "weights", "db"):
                     (repo / folder).mkdir()
                 (repo / "app.py").write_text("print('storage test')\n")
@@ -11453,7 +11453,7 @@ if __name__ == '__main__':
 
         def test_rc7_wizard_execution_command_customization(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "server.py").write_text("print('custom server')\n")
                 con = Console(Settings(target_for(str(repo / "server.py"))))
                 con.render_wizard()
