@@ -12373,7 +12373,9 @@ if __name__ == '__main__':
                 self.assertIsNotNone(con.pending)
 
                 # Distinct subsequent turn with YES must succeed
-                with patch('sys.stdout', new_callable=io.StringIO) as out:
+                with patch('sys.stdout', new_callable=io.StringIO) as out, \
+                     patch.object(DockerAdapter, 'preflight'), \
+                     patch.object(DockerAdapter, 'run'):
                     con.feed_input("YES")
                 self.assertIsNone(con.pending)
                 self.assertEqual(con.smart_stage, "result")
