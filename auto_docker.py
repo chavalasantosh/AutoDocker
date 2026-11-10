@@ -12416,9 +12416,15 @@ if __name__ == '__main__':
             with tempfile.TemporaryDirectory() as tmpdir:
                 repo = Path(tmpdir).resolve()
                 (repo / "app.py").write_text("print('stop test')\n")
-                # When Docker is offline, stop_project handles it gracefully without crash
+                # stop_project handles both running Docker (clean/no resources) and offline Docker (unreachable) gracefully
                 ok, msg = SmartRecoveryCoordinator.stop_project(repo)
-                self.assertIn("Cannot stop containers", msg)
+                probe = DockerHostProbe.probe()
+                if probe.cli_installed and probe.engine_reachable:
+                    self.assertTrue(ok)
+                    self.assertIn("No active containers", msg)
+                else:
+                    self.assertFalse(ok)
+                    self.assertIn("Cannot stop containers", msg)
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(Tests)
     outcome = unittest.TextTestRunner(verbosity=2).run(suite)
