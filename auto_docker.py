@@ -4316,7 +4316,7 @@ class SmartPresenter:
     def format_home(cls, current_project: Path | None = None, recent_count: int = 0, probe: DockerHostStatus | None = None) -> str:
         lines = [
             "=" * 80,
-            "AUTO DOCKER — Zero-Friction Project Launcher (SMART Mode)",
+            "AUTO DOCKER -- Zero-Friction Project Launcher (SMART Mode)",
             "=" * 80,
             "Welcome! Run any Python application or Docker stack with zero container knowledge.",
         ]
@@ -4326,17 +4326,17 @@ class SmartPresenter:
             lines.append(f"Working Folder : {Path.cwd()}")
         if probe:
             if not probe.cli_installed or not probe.engine_reachable:
-                lines.append("Docker Status  : ⚠️  Docker not running yet (Choose [3] for 1-click setup guide)")
+                lines.append("Docker Status  : [!] Docker not running yet (Choose [3] for 1-click setup guide)")
             else:
-                lines.append(f"Docker Status  : ✅ Ready ({probe.server_version or 'Docker Engine active'})")
+                lines.append(f"Docker Status  : [OK] Ready ({probe.server_version or 'Docker Engine active'})")
         lines.extend([
             "-" * 80,
             "What would you like to do?",
-            "  [1] 🚀 Run my project (Auto-Detect, Prepare, and Launch)",
-            "  [2] 📚 60-Second Teammate Guide (How this works in plain English)",
-            "  [3] 🔍 System & Docker Setup Doctor (Step-by-step setup assistance)",
-            f"  [4] 📂 Recent projects ({recent_count} available)",
-            "  [5] 🛠️ Advanced Developer Workbench (Full developer settings & manual tools)",
+            "  [1] [RUN] Run my project (Auto-Detect, Prepare, and Launch)",
+            "  [2] [GUIDE] 60-Second Teammate Guide (How this works in plain English)",
+            "  [3] [DOCTOR] System & Docker Setup Doctor (Step-by-step setup assistance)",
+            f"  [4] [PROJECTS] Recent projects ({recent_count} available)",
+            "  [5] [DEV] Advanced Developer Workbench (Full developer settings & manual tools)",
             "  [0] Exit",
             "-" * 80,
             "Choose an option [0-5] or press [ENTER] to Run:",
@@ -4349,25 +4349,25 @@ class SmartPresenter:
         step = max(1, min(4, step))
         lines = [
             "\n" + "=" * 80,
-            f"AUTO DOCKER — 60-Second Teammate Guide [Card {step} of 4]",
+            f"AUTO DOCKER -- 60-Second Teammate Guide [Card {step} of 4]",
             "=" * 80,
         ]
         if step == 1:
             lines.extend([
-                "💡 CARD 1: What is a Container? (The Plain English Version)",
+                "[*] CARD 1: What is a Container? (The Plain English Version)",
                 "-" * 80,
                 "Think of a container like an instant virtual laptop inside your computer.",
                 "",
-                "• It has clean Python and all needed libraries already installed.",
-                "• It runs your code in an isolated room so nothing conflicts.",
-                "• It guarantees your code works the exact same way on your computer,",
+                "* It has clean Python and all needed libraries already installed.",
+                "* It runs your code in an isolated room so nothing conflicts.",
+                "* It guarantees your code works the exact same way on your computer,",
                 "  on your teammates' computers, and in production.",
                 "",
-                "👉 The big win: You will NEVER hear or say 'It works on my machine' again!",
+                "-> The big win: You will NEVER hear or say 'It works on my machine' again!",
             ])
         elif step == 2:
             lines.extend([
-                "🚀 CARD 2: How Do I Run My Work? (One Simple Command)",
+                "[*] CARD 2: How Do I Run My Work? (One Simple Command)",
                 "-" * 80,
                 "You don't need to write Dockerfiles or remember complicated commands.",
                 "",
@@ -4377,38 +4377,38 @@ class SmartPresenter:
                 "3. Press [ENTER].",
                 "",
                 "Auto Docker automatically:",
-                "  ✓ Finds your entrypoint (like app.py or main.py)",
-                "  ✓ Resolves your dependencies (requirements.txt / pyproject.toml)",
-                "  ✓ Sets up safe ports (e.g. 8000) and launches everything.",
-                "  ✓ If it's a web app, you get a clickable link: http://localhost:8000",
+                "  * Finds your entrypoint (like app.py or main.py)",
+                "  * Resolves your dependencies (requirements.txt / pyproject.toml)",
+                "  * Sets up safe ports (e.g. 8000) and launches everything.",
+                "  * If it's a web app, you get a clickable link: http://localhost:8000",
             ])
         elif step == 3:
             lines.extend([
-                "💾 CARD 3: Where Do My Files and Models Go?",
+                "[*] CARD 3: Where Do My Files and Models Go?",
                 "-" * 80,
                 "New teammates often worry: 'If the container stops, do I lose my work?'",
                 "",
                 "NO! Your files are 100% safe:",
-                "• All folders where your app saves files (like 'artifacts/', 'models/',",
+                "* All folders where your app saves files (like 'artifacts/', 'models/',",
                 "  'data/', or 'logs/') are linked directly to your computer.",
-                "• When your code writes a file inside the container, it appears immediately",
+                "* When your code writes a file inside the container, it appears immediately",
                 "  in your local folder on your computer.",
-                "• Stopping or restarting the container will NEVER delete your data or models.",
+                "* Stopping or restarting the container will NEVER delete your data or models.",
             ])
         elif step == 4:
             lines.extend([
-                "🛑 CARD 4: How Do I Stop, Restart, or Fix Things?",
+                "[*] CARD 4: How Do I Stop, Restart, or Fix Things?",
                 "-" * 80,
-                "• To STOP your project:",
+                "* To STOP your project:",
                 "  Run: python auto_docker.py down",
                 "  Auto Docker shuts down all containers and leaves ZERO leftover junk.",
                 "",
-                "• If your code has an ERROR:",
+                "* If your code has an ERROR:",
                 "  Auto Docker reads the crash log and tells you the exact file and line",
                 "  number in your Python code in plain English. Just edit your code and",
                 "  hit [ENTER] to run again!",
                 "",
-                "🎉 That's it! You now know everything needed to run your work on this team.",
+                "[*] That's it! You now know everything needed to run your work on this team.",
             ])
         lines.extend([
             "-" * 80,
@@ -4423,30 +4423,30 @@ class SmartPresenter:
         system = platform.system().lower()
         lines = [
             "\n" + "=" * 80,
-            "AUTO DOCKER — System & Docker Setup Doctor",
+            "AUTO DOCKER -- System & Docker Setup Doctor",
             "=" * 80,
         ]
         if probe and probe.cli_installed and probe.engine_reachable:
             lines.extend([
-                "✅ DOCKER IS READY AND RUNNING!",
+                "[OK] DOCKER IS READY AND RUNNING!",
                 "-" * 80,
-                f"• Docker Engine version : {probe.server_version or 'detected'}",
-                f"• Docker CLI binary     : {probe.cli_path or 'docker'}",
-                f"• Docker Compose version: {probe.compose_version or 'detected'}",
+                f"* Docker Engine version : {probe.server_version or 'detected'}",
+                f"* Docker CLI binary     : {probe.cli_path or 'docker'}",
+                f"* Docker Compose version: {probe.compose_version or 'detected'}",
                 "",
                 "Your computer is 100% ready to run projects. Press [ENTER] to launch!",
             ])
         else:
             lines.extend([
-                "⚠️ DOCKER IS NOT RUNNING YET",
+                "[!] DOCKER IS NOT RUNNING YET",
                 "-" * 80,
                 "Docker is the engine that runs your project inside a clean, pre-packaged room.",
-                "Don't worry—getting it set up is a one-time 2-minute step:",
+                "Don't worry--getting it set up is a one-time 2-minute step:",
                 "",
             ])
             if "windows" in system:
                 lines.extend([
-                    "👉 WINDOWS SETUP STEPS:",
+                    "-> WINDOWS SETUP STEPS:",
                     "  1. If already installed: Open 'Docker Desktop' from your Start Menu.",
                     "  2. If not installed yet: Download Docker Desktop for Windows:",
                     "     https://www.docker.com/products/docker-desktop/",
@@ -4456,7 +4456,7 @@ class SmartPresenter:
                 ])
             elif "darwin" in system:
                 lines.extend([
-                    "👉 MACOS SETUP STEPS:",
+                    "-> MACOS SETUP STEPS:",
                     "  1. If already installed: Open 'Docker' from your Applications folder.",
                     "  2. If not installed yet: Download Docker Desktop for Mac:",
                     "     https://www.docker.com/products/docker-desktop/",
@@ -4465,7 +4465,7 @@ class SmartPresenter:
                 ])
             else:
                 lines.extend([
-                    "👉 LINUX SETUP STEPS:",
+                    "-> LINUX SETUP STEPS:",
                     "  1. Install Docker with one official command:",
                     "     curl -fsSL https://get.docker.com | sh",
                     "  2. Add your current user so you don't need sudo:",
@@ -4475,7 +4475,7 @@ class SmartPresenter:
                 ])
             lines.extend([
                 "",
-                "💡 Note: Auto Docker can still inspect your project and generate all your",
+                "[*] Note: Auto Docker can still inspect your project and generate all your",
                 "   configuration files in .opsforge/ right now even before Docker is open!",
             ])
         lines.extend([
