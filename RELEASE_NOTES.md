@@ -1,13 +1,50 @@
-# Auto Docker 3.0 RC6 — Release Notes
+# Auto Docker 3.0 RC8 — Release Notes
 
 ## Version Overview
-- **Release**: Auto Docker 3.0 RC6 (Final Stabilization Release)
+- **Release**: Auto Docker 3.0 RC8 (SMART Mode Orchestration Release)
 - **Architecture**: Single-file Python standard-library automation (`auto_docker.py`)
-- **Key Focus**: Production-grade analysis, validation, planning, and deployment reliability for real-world multi-service repositories (modeled after NVIDIA Auto Ontology and Enterprise AutoML/MLOps engines), with beginner-friendly terminal navigation, 3-step Auto-Pilot quick-start wizard, MLOps persistent state mounts, robust approval fingerprinting, multiline paste safety, deterministic state machine lifecycle, and dedicated Docker Resource Cleaner.
+- **Key Focus**: Introducing **SMART Mode** — a unified, one-command intelligent deployment experience (`python auto_docker.py smart [path]`) that makes Docker deployment feel like launching an ordinary application, built on top of the proven RC7 inspection, dependency intelligence, preflight, and cleanup engines.
 
 ---
 
-## What's New in 3.0 RC6
+## What's New in 3.0 RC8 (SMART Mode)
+
+### 1. One-Command Intelligent Deployment (`auto_docker.py smart`)
+- **No Docker Jargon Needed**: Beginners can launch their Python, FastAPI, Flask, ML, or multi-service projects with a single command without learning complex Docker flags or syntax.
+- **Direct Path Support**: Invoke `python auto_docker.py smart /path/to/project` to jump directly into project analysis and deployment review without redundant folder-selection prompts.
+- **Interactive SMART Home**: Provides a clean 6-option navigation menu:
+  - `[1] Run my project`: Auto-detects, prepares, and deploys the project.
+  - `[2] Open a recent project`: Access non-sensitive recent project configurations.
+  - `[3] Check or fix a project`: Diagnoses problems, stale locks, and backups with safe recovery actions.
+  - `[4] Stop a running project`: Safely stops project containers with verified ownership and zero leftovers.
+  - `[5] Advanced Workbench`: Immediate access to developer workbench commands.
+  - `[0] Exit`: Clean exit with zero mutations.
+
+### 2. Evidence-Based Project Understanding (Phase B)
+- **Structured Findings Classification**: Outputs clear evidence categories:
+  - `CONFIRMED`: Verified directly from project files, manifests, or host probes.
+  - `INFERRED`: Derived conclusions (e.g. start commands or PyPI aliases) requiring operator review.
+  - `UNKNOWN`: Missing or inconclusive evidence (e.g. unconfigured persistent storage).
+  - `BLOCKED`: Requirements that prevent safe progress (e.g. unmanifested dependencies in strict mode, or missing Docker CLI).
+- **Plain-English Recommendations**: Explains concrete steps to take before proceeding with deployment.
+
+### 3. Safe Approval & Content-Aware Fingerprinting (Phase C & D)
+- **Deployment Review**: Previews generated files (`.opsforge/Dockerfile`, `compose.yaml`, `manifest.json`), planned startup steps, loopback network bindings (`127.0.0.1:<port>`), and mounted storage.
+- **Existing Stack Reuse**: If existing Compose infrastructure is detected, SMART Mode uses the native execution path rather than generating competing stacks.
+- **Multiline Paste Safety**: Staging deployment generates an immutable `DeploymentDigest` and `PendingAction` tied to a discrete user turn (`requires_distinct_turn=True`). Pasted multiline approvals (`1\nYES`) are strictly rejected.
+
+### 4. Truthful Runtime Reporting & Diagnosis (Phase E & F)
+- **Truthful Readiness Assessment**: Distinguishes verified healthy services from containers running without explicit healthchecks (`RUNNING_UNVERIFIED`). Never fabricates a successful healthcheck.
+- **Graceful Offline Preparation**: When Docker Engine is missing or unreachable, infrastructure files are fully generated and validated offline with clear instructions for starting services once Docker is available.
+- **Actionable Diagnosis**: Specific error causes (e.g. occupied host port, missing dependencies) are surfaced with direct remediation shortcuts.
+
+### 5. SMART Remember & Project Recovery
+- **Safe Preference Memory (`SmartRememberStore`)**: Remembers user preferences in `~/.auto_docker/smart_projects.json` (canonical path, entrypoint, execution kind, mode, port, timestamp) while strictly omitting passwords, secrets, tokens, or security overrides.
+- **Safe Scoped Cleanup**: Stops project containers and cleans temporary resources via `SmartRecoveryCoordinator` and `ResourceCleaner`, strictly protecting unrelated host containers and preserving user data volumes.
+
+---
+
+# Auto Docker 3.0 RC6 / RC7 — Release Notes
 
 ### 1. Intelligent Project Discovery (Milestone RC6-M1)
 - **High-Capacity Discovery**: Bypasses the 240-Python-file limit when existing Compose infrastructure is present. Evaluated successfully against repositories with over 1,000 Python files.

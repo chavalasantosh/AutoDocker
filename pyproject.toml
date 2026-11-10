@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autodocker"
-version = "3.0.0-rc7"
+version = "3.0.0-rc8"
 description = "Auto Docker: Autonomous, zero-dependency container infrastructure generator and deployment orchestrator"
 readme = "README.md"
 authors = [{ name = "Chavala Santosh", email = "santoshysc@gmail.com" }]

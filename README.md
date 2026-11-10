@@ -2,19 +2,20 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-brightgreen.svg)](pyproject.toml)
-[![Release](https://img.shields.io/badge/Release-3.0.0--rc7-orange.svg)](RELEASE_NOTES.md)
+[![Release](https://img.shields.io/badge/Release-3.0.0--rc8-orange.svg)](RELEASE_NOTES.md)
 [![Dependencies](https://img.shields.io/badge/Dependencies-Zero%20(Stdlib%20Only)-success.svg)](requirements.txt)
-[![Tests](https://img.shields.io/badge/Tests-330%20Passed%20(100%25)-brightgreen.svg)](TEST_REPORT.md)
+[![Tests](https://img.shields.io/badge/Tests-339%20Passed%20(100%25)-brightgreen.svg)](TEST_REPORT.md)
 
 > **Autonomous, zero-dependency container infrastructure generator, resource cleaner, and deployment orchestrator in a single Python executable.**
 
-**Auto Docker** transforms any Python, ML, GenAI, or multi-service codebase into hardened, reproducible Docker and Docker Compose environments in seconds. It requires **zero third-party pip dependencies**, never touches or overwrites your source code, enforces strict loopback network security, and provides an interactive terminal workbench alongside a guided 3-step Auto-Pilot wizard.
+**Auto Docker** transforms any Python, ML, GenAI, or multi-service codebase into hardened, reproducible Docker and Docker Compose environments in seconds. It requires **zero third-party pip dependencies**, never touches or overwrites your source code, enforces strict loopback network security, and provides an intelligent **SMART Mode** alongside an interactive terminal workbench and 3-step Auto-Pilot wizard.
 
 ---
 
 ## Highlights
 
 - **Single Master Executable (`auto_docker.py`)**: Zero external pip packages needed at runtime — runs out of the box via `python auto_docker.py`.
+- **SMART Mode (`auto_docker.py smart`)**: One-command intelligent deployment combining project detection, dependency intelligence, preflight verification, deployment planning, and truthful runtime health checks with zero Docker jargon.
 - **Auto-Pilot Quick-Start Wizard**: 3-step guided deployment (`Detect -> Configure -> Safe Deploy`) for zero-friction containerization.
 - **Dependency Intelligence 2.0**:
   - **Standard Library Immunity**: 300+ built-in modules (`json`, `sqlite3`, `pathlib`, `logging`, `dataclasses`, `asyncio`, etc.) are never misclassified as missing pip dependencies.
@@ -40,14 +41,29 @@
 
 ## Quickstart
 
-### 1. Interactive Terminal Workbench
-Run with no arguments to launch the interactive terminal workbench:
+### 1. SMART Mode (Recommended for Beginners)
+Launch intelligent one-command deployment on any project folder:
+
+```bash
+python auto_docker.py smart
+# or specify the project directly
+python auto_docker.py smart /path/to/project
+```
+
+SMART Mode automatically:
+1. **Understands your project**: Detects framework, entrypoint, dependencies, ports, and storage with clear `CONFIRMED` / `INFERRED` / `BLOCKED` evidence.
+2. **Prepares deployment safely**: Generates `.opsforge/Dockerfile` and `compose.yaml` (or reuses existing Compose infrastructure without overwriting).
+3. **One Approval**: Stages immutable deployment review and requires explicit confirmation.
+4. **Verifies Runtime**: Distinguishes verified healthy services from unverified containers without healthchecks.
+
+### 2. Interactive Terminal Workbench
+Run with no arguments to launch the full developer workbench:
 
 ```bash
 python auto_docker.py
 ```
 
-### 2. Auto-Pilot 3-Step Wizard
+### 3. Auto-Pilot 3-Step Wizard
 Launch the guided Quick-Start Wizard directly on any project:
 
 ```bash

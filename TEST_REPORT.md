@@ -1,7 +1,7 @@
-# Auto Docker 3.0 RC7 — Test Report & Verification Evidence
+# Auto Docker 3.0 RC8 — Test Report & Verification Evidence
 
-**Date & Time**: 2026-11-08T22:58:00+05:30  
-**Application Version**: `3.0.0-rc7`  
+**Date & Time**: 2026-11-10T19:15:00+05:30  
+**Application Version**: `3.0.0-rc8`  
 **Python Runtime**: Python 3.13.14 on Windows  
 **Host Environment**: Windows 11 AMD64 (Local Docker Engine: Missing / Unavailable)  
 
@@ -9,12 +9,12 @@
 
 ## 1. Executive Summary
 
-- **Total Unit & Acceptance Tests Executed**: 330
-- **Passed**: 324
-- **Skipped**: 6 (POSIX-only pseudo-terminal and process-probing tests on Windows; all 330 pass on Linux)
+- **Total Unit & Acceptance Tests Executed**: 339
+- **Passed**: 333
+- **Skipped**: 6 (POSIX-only pseudo-terminal and process-probing tests on Windows; all 339 pass on Linux CI)
 - **Failed**: 0
 - **Errors**: 0
-- **Execution Time**: 13.653 seconds
+- **Execution Time**: 30.257 seconds
 
 ---
 
@@ -140,6 +140,22 @@
 | `test_rc7_wizard_execution_command_customization` | **Pass 10 (RC7)**: Verifies Auto-Pilot Wizard Step 2 Option [9] custom execution command customization (`python server.py --host 0.0.0.0 --port 9000`), plan command propagation, and `auto` reset. | **PASS** |
 | `test_rc7_deployment_verification_reliability_differentiates_unverified` | **Pass 10 (RC7)**: Verifies `RuntimeHealth.evaluate` explicitly identifies containers without healthchecks as `RUNNING (no healthcheck; readiness unknown / unverified)`. | **PASS** |
 
+### 2.3 RC8 SMART Mode Orchestration Suite (`test_rc8_smart_*`)
+- **Total SMART Mode Tests**: 9
+- **Passed**: 9, **Failed**: 0
+
+| Test Method | Description | Outcome |
+|:---|:---|:---:|
+| `test_rc8_smart_cli_entrypoint_and_path_arg` | Verifies `auto_docker.py smart <path>` and `Console(ui_mode="smart")` initialization into Phase B (Understand). | **PASS** |
+| `test_rc8_smart_home_navigation_and_cancel` | Verifies SMART Home options 1-5, 0 (exit to menu), and 'q' (clean application exit) without side effects. | **PASS** |
+| `test_rc8_smart_project_profile_evidence_classification` | Verifies `SmartDecisionEngine.analyze` produces structured findings classified as `CONFIRMED`, `INFERRED`, `UNKNOWN`, and `BLOCKED`. | **PASS** |
+| `test_rc8_smart_existing_compose_stack_reuse` | Verifies existing Compose projects are identified, `existing_stack=True`, reusing native infrastructure without generating duplicate files. | **PASS** |
+| `test_rc8_smart_approval_multiline_paste_rejection` | Verifies staged `smart_deploy` PendingAction rejects multiline pasted `1\nYES` and requires a distinct turn confirmation. | **PASS** |
+| `test_rc8_smart_truthful_runtime_unverified_status` | Verifies runtime status differentiates healthy containers from unverified containers lacking explicit healthchecks. | **PASS** |
+| `test_rc8_smart_remember_clean_persistence` | Verifies `SmartRememberStore` persists non-sensitive preferences to `~/.auto_docker/smart_projects.json` while strictly redacting secrets. | **PASS** |
+| `test_rc8_smart_failure_diagnosis_actionable` | Verifies `SmartRecoveryCoordinator.diagnose` provides actionable diagnosis and suggestions for backups and stale locks. | **PASS** |
+| `test_rc8_smart_stop_and_recovery_safety` | Verifies `SmartRecoveryCoordinator.stop_project` handles offline Docker hosts gracefully and cleans only project-owned resources. | **PASS** |
+
 ---
 
 ## 3. Real Docker Host Evidence
@@ -148,7 +164,7 @@
 - **Docker Engine Status**: Unavailable on local machine (accurately identified via `DockerHostProbe`).
 - **Docker Compose Status**: Unavailable on local machine.
 - **Evidence Assessment**:
-  - Offline inspection, environment validation, static Compose analysis, deployment planning, security audits, resource cleaner operations, guided quick-start wizard, MLOps persistent state mounts, scalability (replicas & limits), observability (Prometheus & Grafana), release blocker remediations (port ranges, multi-worker serving, safe discovery, dependency preflight), Dependency Intelligence 2.0 (stdlib immunity, 120+ PyPI package aliases, multi-manifest discovery), and full 10-step workflow passed 100% (324 passed, 6 platform-skipped, 0 failed).
+  - Offline inspection, environment validation, static Compose analysis, deployment planning, security audits, resource cleaner operations, guided quick-start wizard, MLOps persistent state mounts, scalability (replicas & limits), observability (Prometheus & Grafana), release blocker remediations (port ranges, multi-worker serving, safe discovery, dependency preflight), Dependency Intelligence 2.0 (stdlib immunity, 120+ PyPI package aliases, multi-manifest discovery), SMART Mode orchestration engine (profile, decision engine, presenter, recovery coordinator, remember store), and full workflow passed 100% (333 passed, 6 platform-skipped, 0 failed).
   - Live Docker operations (`build`, `up`, `ps`, disposable container startup) could not execute against a real daemon on this machine and are **truthfully classified as BLOCKED** per Gate G7 guidelines.
   - Gate G8 and Gate G9 are marked **OFFLINE_VERIFIED / RUNTIME_BLOCKED** to clearly distinguish verified offline simulation and state-machine tests from unperformed live container runs.
 
@@ -165,10 +181,11 @@
 | **G5** | Deployment plan is deterministic | **PASS** | `DeploymentPlan` generated with topological sort and repeatable JSON export |
 | **G6** | Security and resource checks produce correct classifications | **PASS** | Privileged containers, socket mounts, and 0.0.0.0 DB ports correctly rated `CRITICAL`; security gate enforced; override resets on switch |
 | **G7** | Real Docker builds and startup pass on a supported host | **BLOCKED** | Docker Engine is not installed on the test host environment |
-| **G8** | Application-specific readiness tests pass | **OFFLINE_VERIFIED / RUNTIME_BLOCKED** | Service role classification, dependency graph, cleaner verification, and multi-worker serving verified offline (330 tests). Live runtime execution blocked by host Docker absence |
+| **G8** | Application-specific readiness tests pass | **OFFLINE_VERIFIED / RUNTIME_BLOCKED** | Service role classification, dependency graph, cleaner verification, and multi-worker serving verified offline (339 tests). Live runtime execution blocked by host Docker absence |
 | **G9** | Failure recovery and cleanup are verified | **OFFLINE_VERIFIED / RUNTIME_BLOCKED** | State machine lifecycle, scoped cleanup, and `ResourceCleaner` verified across all sequential scenarios; live container rollback blocked by host Docker absence |
 | **G10** | Single-file distribution is reproducible | **PASS** | `auto_docker.py` remains 100% self-contained in a single executable script; zero nested input calls |
 | **G11** | Guided Quick-Start Wizard & MLOps State Persistence | **PASS** | 3-step interactive Auto-Pilot wizard (`Detect -> Configure -> Safe Deploy`), MLOps volume mounting for `artifacts/` and `models/`, accurate AST scope check |
 | **G12** | Scalability and Observability Orchestration | **PASS** | Container replicas & resource limits in Compose; Prometheus and Grafana service generation with automated scraping; Enterprise AutoML workers and OpenMetrics `/metrics` endpoint |
 | **G13** | Release Blocker Remediation & Safe Discovery | **PASS** | Multi-worker factory serving, replica port ranges, strict slug/label discovery, orphan isolation, non-zero cleaner exit on missing Docker, dependency blocking |
 | **G14** | Dependency Intelligence 2.0 & Deployment Reliability Engine | **PASS** | Standard library immunity; 120+ PyPI package and alias mappings; multi-manifest discovery (setup.cfg, setup.py, Pipfile, environment.yml); unverified container differentiation; Wizard custom execution command Option [9]; expanded persistent storage |
+| **G15** | SMART Mode Orchestration & One-Command Intelligent Deployment | **PASS** | Full 6-phase SMART Mode orchestration (`auto_docker.py smart [path]`), evidence classification, immutable approval digest, multiline paste safety, truthful runtime health, safe preference memory (`SmartRememberStore`), and recovery coordinator |

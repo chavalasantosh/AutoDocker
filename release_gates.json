@@ -1,17 +1,17 @@
 {
-  "version": "3.0.0-rc7",
-  "timestamp": "2026-11-08T22:58:00+05:30",
+  "version": "3.0.0-rc8",
+  "timestamp": "2026-11-10T19:15:00+05:30",
   "environment": {
     "os": "Windows 11 AMD64",
     "python": "3.13.14",
     "docker_installed": false
   },
   "test_summary": {
-    "total": 330,
-    "passed": 324,
+    "total": 339,
+    "passed": 333,
     "failed": 0,
     "skipped": 6,
-    "duration_seconds": 13.653
+    "duration_seconds": 30.257
   },
   "release_gates": [
     {
@@ -97,8 +97,14 @@
       "name": "Dependency Intelligence 2.0 & Deployment Reliability Engine",
       "status": "PASS",
       "details": "Standard library immunity (STDLIB_MODULES with 300+ modules) prevents misclassifying built-in modules as missing; expanded IMPORT_PACKAGES to 120+ curated distributions including top-level import aliases (cv2 -> opencv-python, PIL -> Pillow, yaml -> PyYAML, dotenv -> python-dotenv, bs4 -> beautifulsoup4, psycopg2 -> psycopg2-binary, fitz -> PyMuPDF, skimage -> scikit-image, jwt -> PyJWT, docx -> python-docx, dateutil -> python-dateutil, etc.); multi-manifest discovery and parsing (requirements.txt, pyproject.toml, setup.cfg, setup.py, Pipfile, environment.yml); multi-manifest Dockerfile generation; deployment verification reliability differentiating healthy healthchecks from unverified running containers; Auto-Pilot Wizard Step 2 Option [9] for custom execution commands; and expanded persistent storage auto-detection (datasets, storage, outputs, output, logs, weights, db, database)."
+    },
+    {
+      "gate": "G15",
+      "name": "SMART Mode Orchestration & One-Command Intelligent Deployment",
+      "status": "PASS",
+      "details": "Implemented Auto Docker SMART Mode via 'python auto_docker.py smart [path]' CLI entrypoint and interactive Workbench Option [S]. Full 6-phase orchestration: Phase A (Select: path pasting, browsing, recent projects, clean exit/cancel), Phase B (Understand: structured SmartProjectProfile with CONFIRMED/INFERRED/UNKNOWN/BLOCKED evidence classifications), Phase C (Prepare: deterministic proposal, loopback port binding, storage mounting, existing Compose stack reuse), Phase D (Approve: distinct-turn PendingAction with DeploymentDigest, multiline paste rejection), Phase E (Execute: build, up, offline detection, verification), Phase F (Explain: truthful runtime reporting differentiating HEALTHY from RUNNING_UNVERIFIED). SmartRememberStore safely persists non-sensitive preferences to ~/.auto_docker/smart_projects.json while strictly omitting credentials, tokens, or security overrides. SmartRecoveryCoordinator handles stale locks, backup restoration, and scoped project stopping."
     }
   ],
-  "decision": "RC7 OFFLINE VERIFIED / LIVE RUNTIME BLOCKED",
-  "decision_reason": "All offline engineering milestones, lifecycle corrections, safe approval gates, multiline paste protections, content-aware deployment fingerprinting, beginner-friendly browser navigation, dedicated ResourceCleaner subsystem, loopback-only network isolation, container PID 1 signal handling, Guided Quick-Start Wizard, MLOps persistent state mounts, scalability (replicas & resource limits), observability (Prometheus & Grafana orchestration), release blocker remediations, Dependency Intelligence 2.0 (stdlib immunity, 120+ PyPI package aliases, multi-manifest discovery), Deployment Reliability Engine (verification reliability, wizard custom commands, expanded storage), and 330 automated tests passed (324 passed, 6 platform-skipped on Windows; all 330 expected on Linux). Live Docker container execution is blocked on this host environment because Docker Engine is not installed on PATH."
+  "decision": "RC8 OFFLINE VERIFIED / LIVE RUNTIME BLOCKED",
+  "decision_reason": "All offline engineering milestones, SMART Mode orchestration engine (SmartProjectProfile, SmartDecisionEngine, SmartPresenter, SmartRecoveryCoordinator, SmartRememberStore, CLI 'smart' action), safe approval gates, multiline paste protections, content-aware deployment fingerprinting, beginner-friendly browser navigation, dedicated ResourceCleaner subsystem, loopback-only network isolation, container PID 1 signal handling, Guided Quick-Start Wizard, MLOps persistent state mounts, scalability (replicas & resource limits), observability (Prometheus & Grafana orchestration), release blocker remediations, Dependency Intelligence 2.0 (stdlib immunity, 120+ PyPI package aliases, multi-manifest discovery), Deployment Reliability Engine (verification reliability, wizard custom commands, expanded storage), and 339 automated tests passed (333 passed, 6 platform-skipped on Windows; all 339 expected on Linux). Live Docker container execution is blocked on this host environment because Docker Engine is not installed on PATH."
 }

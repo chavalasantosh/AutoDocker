@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Auto Docker 3.0 RC6 — single-file, standard-library Docker infrastructure generator.
+"""Auto Docker 3.0 RC8 — SMART Mode: single-file, standard-library Docker infrastructure generator.
 
 Run:      python auto_docker.py
 Automate: python auto_docker.py generate '/path/to/app.py' --mode llmops --yes
 Test:     python auto_docker.py self-test
 
-Interactive commands: help, project PATH, existing, native ACTION, mode NAME, kind auto|web|batch|interactive, services NAME,...,
+Interactive commands: help, project PATH, smart, existing, native ACTION, mode NAME, kind auto|web|batch|interactive, services NAME,...,
     entry FILE, port N|auto, gpu on|off, doctor, inspect, preview [full],
     generate, check, build, up, down,
     ps, logs, verify, ports, hostport, status, lock, recover, unlock, back, quit.
@@ -46,7 +46,7 @@ import platform
 from enum import Enum
 from typing import Any, Iterator
 
-VERSION = "3.0.0-rc7"
+VERSION = "3.0.0-rc8"
 LOG = logging.getLogger("auto_docker")
 OUTPUT = ".opsforge"
 MAX_VISITED = 3000
@@ -4074,6 +4074,390 @@ class PendingAction:
     requires_distinct_turn: bool = False
 
 
+# ---------- Auto Docker RC8 — SMART Mode Orchestration Engine ----------
+
+
+@dataclasses.dataclass(frozen=True)
+class SmartProjectProfile:
+    project_root: Path
+    project_name: str
+    entrypoint_candidates: tuple[str, ...]
+    selected_entrypoint: str
+    framework: str
+    execution_kind: str
+    start_command: tuple[str, ...]
+    dependency_sources: tuple[str, ...]
+    unresolved_dependencies: tuple[str, ...]
+    compose_files: tuple[str, ...]
+    published_ports: tuple[tuple[str, int, int], ...]
+    persistent_paths: tuple[str, ...]
+    required_env_names: tuple[str, ...]
+    confidence_findings: tuple[tuple[str, str, str], ...]  # (category, status, detail)
+    risk_findings: tuple[str, ...]
+    is_ready: bool
+    recommendations: tuple[str, ...]
+    existing_stack: bool = False
+
+
+class SmartRememberStore:
+    """Safely remembers verified, non-sensitive project configuration in ~/.auto_docker/smart_projects.json."""
+
+    STORE_PATH = Path.home() / ".auto_docker" / "smart_projects.json"
+
+    @classmethod
+    def load(cls) -> dict[str, dict[str, Any]]:
+        if not cls.STORE_PATH.exists():
+            return {}
+        try:
+            data = json.loads(cls.STORE_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and "projects" in data:
+                return data["projects"]
+            if isinstance(data, dict):
+                return data
+            return {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    @classmethod
+    def save(cls, project_root: str | Path, config: dict[str, Any]) -> None:
+        try:
+            canonical = str(Path(project_root).resolve())
+            cls.STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            existing = cls.load()
+            safe_config = {
+                "entrypoint": config.get("entrypoint"),
+                "mode": config.get("mode", "auto"),
+                "execution_kind": config.get("execution_kind", "web"),
+                "port": config.get("port"),
+                "gpu": bool(config.get("gpu", False)),
+                "replicas": config.get("replicas", 1),
+                "fingerprint": config.get("fingerprint", ""),
+                "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+            }
+            existing[canonical] = safe_config
+            payload = {"version": 1, "projects": existing}
+            temp_file = cls.STORE_PATH.with_suffix(".tmp")
+            temp_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            temp_file.replace(cls.STORE_PATH)
+        except OSError:
+            pass
+
+    @classmethod
+    def get(cls, project_root: str | Path) -> dict[str, Any] | None:
+        canonical = str(Path(project_root).resolve())
+        return cls.load().get(canonical)
+
+
+class SmartDecisionEngine:
+    """Analyzes a project repository and produces an evidence-based SmartProjectProfile."""
+
+    @classmethod
+    def analyze(cls, root: Path, settings: Settings | None = None) -> tuple[SmartProjectProfile, Plan | None]:
+        resolved_root = root.resolve()
+        project_name = resolved_root.name
+        existing = ExistingInfrastructure.discover(resolved_root)
+        probe = DockerHostProbe.probe(context=settings.docker_context if settings else None)
+
+        confidence_findings: list[tuple[str, str, str]] = []
+        risk_findings: list[str] = []
+        recommendations: list[str] = []
+
+        # Check Docker Engine
+        if not probe.cli_installed:
+            confidence_findings.append(("Docker Engine", "BLOCKED", "Docker CLI not found on host PATH. Generation works without Docker; install Docker to run."))
+            recommendations.append("Install Docker CLI on your machine to build and run containers.")
+        elif not probe.engine_reachable:
+            confidence_findings.append(("Docker Engine", "BLOCKED", f"Docker Engine unreachable ({probe.error_detail or 'daemon not running'}). Generation works offline."))
+            recommendations.append("Start your Docker daemon or Desktop to run containers.")
+        else:
+            confidence_findings.append(("Docker Engine", "CONFIRMED", f"Docker Engine active ({probe.summary})"))
+
+        if existing.compose_files:
+            # Case 1: Existing Compose Infrastructure Detected
+            compose_files = tuple(existing.compose_files)
+            confidence_findings.append(("Infrastructure", "CONFIRMED", f"Existing Docker Compose stack detected ({', '.join(compose_files)})"))
+            ports: list[tuple[str, int, int]] = []
+            for s in existing.discovered_services:
+                for p in s.ports:
+                    ports.append((s.name, p.host, p.container))
+
+            readiness = NativeReadiness.report(resolved_root, docker_context=settings.docker_context if settings else None)
+            missing_vars = [f.name for f in readiness.findings if f.level == "BLOCKER"]
+            if missing_vars:
+                confidence_findings.append(("Environment", "BLOCKED", f"Missing required environment variables: {', '.join(missing_vars)}"))
+                risk_findings.append(f"Unset required environment variables: {', '.join(missing_vars)}")
+                recommendations.append(f"Configure required variables in .env: {', '.join(missing_vars)}")
+            else:
+                confidence_findings.append(("Environment", "CONFIRMED", "Environment variables satisfied or defaulted"))
+
+            profile = SmartProjectProfile(
+                project_root=resolved_root,
+                project_name=project_name,
+                entrypoint_candidates=(),
+                selected_entrypoint="compose.yaml",
+                framework="Docker Compose Stack",
+                execution_kind="services",
+                start_command=("docker", "compose", "up", "-d"),
+                dependency_sources=compose_files,
+                unresolved_dependencies=(),
+                compose_files=compose_files,
+                published_ports=tuple(ports),
+                persistent_paths=(),
+                required_env_names=tuple(missing_vars),
+                confidence_findings=tuple(confidence_findings),
+                risk_findings=tuple(risk_findings),
+                is_ready=len(missing_vars) == 0,
+                recommendations=tuple(recommendations),
+                existing_stack=True,
+            )
+            return profile, None
+
+        # Case 2: Standard Python Project Discovery & Planning
+        target = Target(resolved_root, settings.target.pinned if settings else None)
+        inspection = Inspector().inspect(target, settings.entry if settings else None)
+        effective_settings = settings or Settings(target)
+        plan = Planner().build(effective_settings, inspection)
+
+        # Language and framework
+        if inspection.entry.framework != "python":
+            confidence_findings.append(("Language / Framework", "CONFIRMED", f"Python / {inspection.entry.framework.capitalize()} application"))
+        else:
+            confidence_findings.append(("Language / Framework", "CONFIRMED", "Python application"))
+
+        # Entrypoint
+        confidence_findings.append(("Entrypoint", "CONFIRMED", f"{inspection.entry.path} (score: {inspection.entry.score})"))
+
+        # Start Command
+        if effective_settings.command_override:
+            confidence_findings.append(("Start Command", "CONFIRMED", f"Customized: {' '.join(effective_settings.command_override)}"))
+        else:
+            confidence_findings.append(("Start Command", "INFERRED", f"Auto: {' '.join(plan.command)}"))
+
+        # Dependencies
+        dep_report = DependencyAudit().report(inspection)
+        unresolved: list[str] = []
+        if inspection.dependency:
+            confidence_findings.append(("Dependencies", "CONFIRMED", f"Manifest verified: {inspection.dependency}"))
+        else:
+            if dep_report.possible_missing:
+                if getattr(effective_settings, "dependency_mode", "strict") == "infer":
+                    confidence_findings.append(("Dependencies", "INFERRED", f"Unmanifested imports allowed via inference: {', '.join(dep_report.possible_missing[:4])}"))
+                else:
+                    unresolved = list(dep_report.possible_missing)
+                    confidence_findings.append(("Dependencies", "BLOCKED", f"Unmanifested external dependencies detected: {', '.join(unresolved[:4])}"))
+                    risk_findings.append(f"Project has external imports without a requirements.txt: {', '.join(unresolved[:4])}")
+                    recommendations.append("Enable dependency inference or generate requirements.txt before running.")
+            else:
+                confidence_findings.append(("Dependencies", "CONFIRMED", "Standard library only (no external dependencies required)"))
+
+        # Persistent storage
+        if plan.persistent_dirs:
+            confidence_findings.append(("Persistent Storage", "CONFIRMED", f"Data folders detected: {', '.join(plan.persistent_dirs)} (models & data preserved)"))
+        else:
+            confidence_findings.append(("Persistent Storage", "UNKNOWN", "No dedicated data/model directories found (standard container storage)"))
+
+        # Port conflicts
+        ports_list: list[tuple[str, int, int]] = []
+        if plan.published_ports:
+            for p in plan.published_ports:
+                ports_list.append((p.service, p.host, p.container))
+            port_report = PortAudit.report(plan.published_ports)
+            for mapping, ok, detail in port_report:
+                if not ok:
+                    risk_findings.append(f"Port conflict: host port {mapping.host} is already in use: {detail}")
+                    recommendations.append(f"Host port {mapping.host} is occupied; select an alternate port.")
+
+        is_ready = len(unresolved) == 0 and not any(f[1] == "BLOCKED" for f in confidence_findings if f[0] == "Dependencies")
+
+        profile = SmartProjectProfile(
+            project_root=resolved_root,
+            project_name=project_name,
+            entrypoint_candidates=tuple(c.path for c in inspection.candidates),
+            selected_entrypoint=inspection.entry.path,
+            framework=inspection.entry.framework,
+            execution_kind=plan.execution_kind,
+            start_command=tuple(plan.command),
+            dependency_sources=(inspection.dependency,) if inspection.dependency else (),
+            unresolved_dependencies=tuple(unresolved),
+            compose_files=(),
+            published_ports=tuple(ports_list),
+            persistent_paths=tuple(plan.persistent_dirs),
+            required_env_names=(),
+            confidence_findings=tuple(confidence_findings),
+            risk_findings=tuple(risk_findings),
+            is_ready=is_ready,
+            recommendations=tuple(recommendations),
+            existing_stack=False,
+        )
+        return profile, plan
+
+
+class SmartPresenter:
+    """Formats beginner-friendly terminal screens for SMART Mode."""
+
+    @classmethod
+    def format_home(cls, current_project: Path | None = None, recent_count: int = 0, probe: DockerHostStatus | None = None) -> str:
+        lines = [
+            "=" * 80,
+            "AUTO DOCKER — SMART MODE: One-Command Intelligent Deployment",
+            "=" * 80,
+            "Welcome! Deploy any Python application or Docker stack with zero hassle.",
+        ]
+        if current_project:
+            lines.append(f"Current Project: {current_project}")
+        else:
+            lines.append(f"Terminal Folder: {Path.cwd()} (not selected)")
+        if probe:
+            lines.append(f"Docker Status  : {probe.summary}")
+        lines.extend([
+            "-" * 80,
+            "What would you like to do?",
+            "  [1] Run my project (Auto-Detect, Prepare, and Launch)",
+            f"  [2] Open a recent project ({recent_count} available)",
+            "  [3] Check or fix a project (Diagnose problems & recover)",
+            "  [4] Stop a running project (Safe shutdown with zero leftovers)",
+            "  [5] Advanced Workbench (Full developer settings & manual tools)",
+            "  [0] Exit",
+            "-" * 80,
+            "Choose an option [0-5]:",
+            "=" * 80,
+        ])
+        return "\n".join(lines)
+
+    @classmethod
+    def format_understand(cls, profile: SmartProjectProfile) -> str:
+        confirmed_cnt = sum(1 for f in profile.confidence_findings if f[1] == "CONFIRMED")
+        inferred_cnt = sum(1 for f in profile.confidence_findings if f[1] == "INFERRED")
+        unknown_cnt = sum(1 for f in profile.confidence_findings if f[1] == "UNKNOWN")
+        blocked_cnt = sum(1 for f in profile.confidence_findings if f[1] == "BLOCKED")
+
+        lines = [
+            "\n" + "=" * 80,
+            "AUTO DOCKER — SMART: Project Understanding",
+            "=" * 80,
+            f"Project Name     : {profile.project_name}",
+            f"Project Location : {profile.project_root}",
+        ]
+        for category, status, detail in profile.confidence_findings:
+            tag = f"[{status}]"
+            lines.append(f"{category:18s}: {detail} {tag}")
+
+        lines.extend([
+            "-" * 80,
+            f"Evidence Assessment: {confirmed_cnt} CONFIRMED | {inferred_cnt} INFERRED | {unknown_cnt} UNKNOWN | {blocked_cnt} BLOCKED",
+        ])
+        if profile.recommendations:
+            lines.append("-" * 80)
+            lines.append("Recommendations:")
+            for rec in profile.recommendations:
+                lines.append(f"  • {rec}")
+        lines.extend([
+            "-" * 80,
+            "Next Steps:",
+            "  Press [ENTER] or '1' to Prepare Deployment Plan",
+            "  Type 'fix' or '2' to Customize or Resolve Issues",
+            "  Type '0' or 'back' to Return to SMART Home",
+            "=" * 80,
+        ])
+        return "\n".join(lines)
+
+    @classmethod
+    def format_review(cls, profile: SmartProjectProfile, plan: Plan | None) -> str:
+        lines = [
+            "\n" + "=" * 80,
+            "AUTO DOCKER — SMART: Deployment Review & Approval",
+            "=" * 80,
+            f"Project Target  : {profile.project_root}",
+        ]
+        if profile.existing_stack:
+            lines.extend([
+                f"Existing Stack  : {', '.join(profile.compose_files)}",
+                f"Action Planned  : docker compose up -d (Preserve original files byte-for-byte)",
+            ])
+        else:
+            lines.extend([
+                "Will Create     : .opsforge/Dockerfile",
+                "                  .opsforge/compose.yaml",
+                "                  .opsforge/manifest.json",
+                f"Execution Style : {profile.execution_kind.upper()}",
+                f"Start Command   : {' '.join(profile.start_command)}",
+            ])
+            if plan and plan.services:
+                lines.append(f"Services        : app, {', '.join(plan.services)}")
+            if plan and (plan.replicas > 1 or plan.cpus or plan.memory):
+                lines.append(f"Scale & Limits  : Replicas={plan.replicas}, CPUs={plan.cpus or 'unlimited'}, Mem={plan.memory or 'unlimited'}")
+
+        if profile.published_ports:
+            lines.append("Network / Ports : " + ", ".join(f"127.0.0.1:{p[1]} -> {p[2]} ({p[0]})" for p in profile.published_ports))
+        else:
+            lines.append("Network / Ports : Loopback only (no exposed host ports)")
+
+        if profile.persistent_paths:
+            lines.append("Persistent Data : " + ", ".join(f"./{p} (mounted safely)" for p in profile.persistent_paths))
+        else:
+            lines.append("Persistent Data : Container storage (no mounted data directories)")
+
+        if profile.risk_findings:
+            lines.append("Risk Findings   : " + " | ".join(profile.risk_findings))
+        else:
+            lines.append("Risk Assessment : LOW RISK (restricted loopback binding, safe user context)")
+
+        lines.extend([
+            "-" * 80,
+            "Choose an action:",
+            "  [1] Build and Run (Stage deployment with approval)",
+            "  [2] Generate files only (Inspect .opsforge/ configuration)",
+            "  [3] Preview generated configuration details",
+            "  [4] Change settings (Port, Mode, GPU, Replicas, Dependencies)",
+            "  [0] Cancel & Return to SMART Home",
+            "=" * 80,
+        ])
+        return "\n".join(lines)
+
+
+class SmartRecoveryCoordinator:
+    """Coordinates project recovery, stale lock removal, and scoped cleanup."""
+
+    @classmethod
+    def diagnose(cls, root: Path) -> list[str]:
+        findings = []
+        resolved = root.resolve()
+        lock = ProjectLock(resolved)
+        try:
+            if hasattr(lock, "is_stale") and lock.is_stale():
+                findings.append("Stale lock detected from a previous session.")
+        except Exception:
+            pass
+        backups = sorted(resolved.glob(".opsforge-backup-*"))
+        if backups:
+            findings.append(f"Recoverable backup found: {backups[-1].name}")
+        return findings
+
+    @classmethod
+    def clear_lock(cls, root: Path) -> str:
+        return ProjectLock(root.resolve()).clear_stale()
+
+    @classmethod
+    def restore_backup(cls, root: Path) -> Path | None:
+        return OutputManager(root.resolve()).restore_last_backup()
+
+    @classmethod
+    def stop_project(cls, root: Path, context: str | None = None) -> tuple[bool, str]:
+        resolved = root.resolve()
+        docker_bin = shutil.which("docker") or "docker"
+        prefix = [docker_bin]
+        if context:
+            prefix.extend(["--context", context])
+        probe = DockerHostProbe.probe(context=context)
+        if not probe.cli_installed or not probe.engine_reachable:
+            return False, f"Docker Engine unreachable ({probe.error_detail or 'daemon not running'}). Cannot stop containers."
+        plan = ResourceCleaner.plan_cleanup(mode="project", target_project=str(resolved), prefix=prefix)
+        if plan.total_count == 0:
+            return True, "No active containers or resources found for this project."
+        result = ResourceCleaner.execute(plan, prefix=prefix)
+        return result.success, result.message
+
+
 class Console:
     def __init__(self, settings: Settings | None = None, allow_insecure: bool = False):
         self.settings = settings
@@ -4099,6 +4483,12 @@ class Console:
         self.wizard_persist: bool = True
         self.wizard_awaiting_port: bool = False
         self.wizard_awaiting_command: bool = False
+        self.smart_stage: str = "home"
+        self.smart_profile: SmartProjectProfile | None = None
+        self.smart_plan: Plan | None = None
+        self.smart_last_result: str = ""
+        self.smart_awaiting_path: bool = False
+        self.smart_awaiting_fix: bool = False
 
     def print_workbench_menu(self) -> None:
         probe = DockerHostProbe.probe(context=self.settings.docker_context if self.settings else None)
@@ -4115,6 +4505,7 @@ class Console:
         print(f"Project   : {proj_str}{pinned_str}")
         print(f"Mode      : {mode_str} | Docker: {engine_str} | State: {state_str}{insecure_str}")
         print("-" * 80)
+        print(" [S] SMART Mode: One-Command Intelligent Deployment (Auto-Detect, Prepare, Run & Verify)")
         print(" [A] Auto-Pilot: Guided Quick-Start Wizard (Detect -> Configure -> Safe Deploy)")
         print(" [1] Open Project / Quick Select (Paste path or open browser)")
         print(" [2] Interactive Project Browser (Navigate folders, pick entrypoint)")
@@ -4216,6 +4607,88 @@ class Console:
                                          allow_insecure=self.allow_insecure,
                                          orchestrator=self.orchestrator)
             return
+        if pending.name == "smart_deploy":
+            curr_digest = DeploymentDigest.compute(
+                root,
+                "smart_deploy",
+                docker_context=pending.settings.docker_context,
+                allow_insecure=self.allow_insecure,
+            )
+            if pending.digest and curr_digest != pending.digest:
+                raise OpsError("Project configuration or files changed while awaiting approval; review and confirm again.")
+
+            probe = DockerHostProbe.probe(context=pending.settings.docker_context)
+            existing = ExistingInfrastructure.discover(root)
+
+            if existing.compose_files:
+                if not probe.cli_installed or not probe.engine_reachable:
+                    print("\n" + "=" * 80)
+                    print("AUTO DOCKER — SMART: Existing Infrastructure Verified (Offline)")
+                    print("=" * 80)
+                    print(f"Existing Compose files verified: {', '.join(existing.compose_files)}")
+                    print(f"Docker Engine is unreachable ({probe.error_detail or 'daemon not running'}).")
+                    print("Stack is valid! Start Docker to run 'auto_docker.py up'.")
+                    print("=" * 80)
+                    self.smart_stage = "result"
+                    return
+                else:
+                    ExistingInfrastructure.apply(root, "up", approved=True,
+                                                 context=pending.settings.docker_context,
+                                                 allow_insecure=self.allow_insecure,
+                                                 orchestrator=self.orchestrator)
+                    SmartRememberStore.save(root, {
+                        "entrypoint": "compose.yaml",
+                        "mode": "existing",
+                        "execution_kind": "services",
+                        "port": None,
+                    })
+                    self.smart_stage = "result"
+                    return
+            else:
+                plan = self._plan()
+                files = self.renderer.files(plan)
+                manager = OutputManager(root)
+                backup = manager.write(files)
+                print(f"\nGenerated Docker infrastructure: {manager.folder}" + (f" (backup: {backup})" if backup else ""))
+
+                SmartRememberStore.save(root, {
+                    "entrypoint": plan.inspection.entry.path,
+                    "mode": plan.mode.value,
+                    "execution_kind": plan.execution_kind,
+                    "port": plan.port,
+                    "gpu": pending.settings.gpu,
+                    "replicas": getattr(pending.settings, "replicas", 1),
+                })
+
+                if not probe.cli_installed or not probe.engine_reachable:
+                    print("\n" + "=" * 80)
+                    print("AUTO DOCKER — SMART: Infrastructure Generated (Offline)")
+                    print("=" * 80)
+                    print("Docker Engine is not running or not installed on this host.")
+                    print("All container files have been prepared successfully in .opsforge/!")
+                    print("When Docker is available, run 'auto_docker.py up' or choose [1] from SMART Home.")
+                    print("=" * 80)
+                    self.smart_stage = "result"
+                    return
+                else:
+                    adapter = DockerAdapter(root, pending.settings.docker_context)
+                    adapter.preflight()
+                    print("\nBuilding container image...")
+                    adapter.run("build")
+                    print("\nStarting container services...")
+                    adapter.run("up")
+                    ok, rows = adapter.verify()
+                    has_unverified = any("no healthcheck" in r for r in rows)
+                    if not ok:
+                        print("\nDEPLOYMENT DEGRADED: One or more containers failed or exited.")
+                    elif has_unverified:
+                        print("\nCONTAINER STARTED — READINESS NOT CONFIRMED (running without explicit healthcheck probe)")
+                    else:
+                        print("\nPROJECT STARTED — HEALTHY & VERIFIED")
+                    for r in rows:
+                        print("  " + r)
+                    self.smart_stage = "result"
+                    return
         raise OpsError("Unrecognized pending operation: " + pending.name)
 
     def _set(self, **changes: Any) -> None:
@@ -4993,10 +5466,334 @@ class Console:
             print(f"Unrecognized choice: '{cmd}'. Choose 1 (Deploy), 2 (Dry-Run), 3 (Generate), or 0 (Menu).")
             return True
 
+    def render_smart(self) -> None:
+        self.ui_mode = "smart"
+        if self.smart_stage == "home":
+            if self.settings:
+                self.smart_stage = "understand"
+                self.render_smart()
+                return
+            probe = DockerHostProbe.probe(context=self.settings.docker_context if self.settings else None)
+            print(SmartPresenter.format_home(None, len(self.recent_projects), probe))
+            return
+
+        if self.smart_stage == "understand":
+            if not self.settings:
+                self.smart_stage = "home"
+                self.render_smart()
+                return
+            self.smart_profile, self.smart_plan = SmartDecisionEngine.analyze(self.settings.target.root, self.settings)
+            print(SmartPresenter.format_understand(self.smart_profile))
+            return
+
+        if self.smart_stage == "review":
+            if not self.settings:
+                self.smart_stage = "home"
+                self.render_smart()
+                return
+            if not self.smart_profile:
+                self.smart_profile, self.smart_plan = SmartDecisionEngine.analyze(self.settings.target.root, self.settings)
+            print(SmartPresenter.format_review(self.smart_profile, self.smart_plan))
+            return
+
+        if self.smart_stage == "recent":
+            projects = RecentProjectsStore.load()
+            print("\n" + "=" * 80)
+            print("AUTO DOCKER — SMART: Recent Projects")
+            print("=" * 80)
+            if not projects:
+                print("No recent projects found.")
+            else:
+                for idx, p in enumerate(projects[:9], 1):
+                    print(f" [{idx}] {p}")
+            print("-" * 80)
+            print("Type a number [1-9] to open a project, or '0' for SMART Home:")
+            print("=" * 80)
+            return
+
+        if self.smart_stage == "fix":
+            print("\n" + "=" * 80)
+            print("AUTO DOCKER — SMART: Project Diagnostics & Fixes")
+            print("=" * 80)
+            root = self.settings.target.root if self.settings else Path.cwd()
+            diag = SmartRecoveryCoordinator.diagnose(root)
+            if diag:
+                for d in diag:
+                    print(f"  • {d}")
+            else:
+                print("No recovery issues or stale locks detected.")
+            print("-" * 80)
+            print("Quick Actions:")
+            print("  [1] Clear stale locks (unlock)")
+            print("  [2] Restore last backup configuration")
+            print("  [3] Toggle dependency inference (allow unmanifested imports)")
+            print("  [4] Change application port")
+            print("  [0] Return to SMART Home")
+            print("=" * 80)
+            return
+
+        if self.smart_stage == "result":
+            print("\n" + "=" * 80)
+            print("AUTO DOCKER — SMART: Operations Menu")
+            print("=" * 80)
+            print("What would you like to do next?")
+            print("  [1] View container logs (logs)")
+            print("  [2] Check service status & health (verify)")
+            print("  [3] Restart project (up)")
+            print("  [4] Stop project (clean shutdown)")
+            print("  [0] Return to SMART Home")
+            print("=" * 80)
+            return
+
+    def _stage_smart_deploy(self) -> None:
+        if not self.settings:
+            raise OpsError("No project selected.")
+        root = self.settings.target.root
+        digest = DeploymentDigest.compute(
+            root,
+            "smart_deploy",
+            docker_context=self.settings.docker_context,
+            allow_insecure=self.allow_insecure,
+        )
+        self.pending = PendingAction(
+            name="smart_deploy",
+            settings=self.settings,
+            digest=digest,
+            staged_turn=self.input_turn,
+            requires_distinct_turn=True,
+        )
+        print("\n" + "=" * 80)
+        print("APPROVAL REQUIRED — SMART DEPLOYMENT")
+        print("=" * 80)
+        print("You are about to build and launch this project:")
+        print(f"  Target: {root}")
+        print("  Files will be created in .opsforge/ (or existing stack reused)")
+        print("  Container services will be built and started")
+        print("-" * 80)
+        print("Type YES on the next prompt to approve, or type cancel:")
+        print("=" * 80)
+
+    def _stage_smart_generate(self) -> None:
+        if not self.settings:
+            raise OpsError("No project selected.")
+        root = self.settings.target.root
+        plan = self._plan()
+        files = self.renderer.files(plan)
+        manager = OutputManager(root)
+        backup = manager.write(files)
+        print(f"\nGenerated Docker infrastructure: {manager.folder}" + (f" (backup: {backup})" if backup else ""))
+        SmartRememberStore.save(root, {
+            "entrypoint": plan.inspection.entry.path,
+            "mode": plan.mode.value,
+            "execution_kind": plan.execution_kind,
+            "port": plan.port,
+            "gpu": self.settings.gpu,
+            "replicas": getattr(self.settings, "replicas", 1),
+        })
+        self.smart_stage = "result"
+        self.render_smart()
+
+    def _handle_smart_input(self, line: str) -> bool:
+        cmd = line.strip().lower()
+        if cmd in {"q", "quit", "exit"}:
+            return False
+        if cmd in {"menu", "workbench"}:
+            self.ui_mode = "menu"
+            self.smart_stage = "home"
+            self.print_workbench_menu()
+            return True
+
+        if self.smart_stage == "home":
+            if cmd in {"0", "back", "cancel"}:
+                self.ui_mode = "menu"
+                self.print_workbench_menu()
+                return True
+            if self.smart_awaiting_path:
+                self.smart_awaiting_path = False
+                if cmd in {"0", "cancel", "back"}:
+                    self.render_smart()
+                    return True
+                self.execute(f"project '{line.strip()}'")
+                self.smart_stage = "understand"
+                self.render_smart()
+                return True
+            if cmd == "1":
+                cwd = Path.cwd()
+                has_py = any(cwd.glob("*.py"))
+                has_compose = any((cwd / f).is_file() for f in ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"))
+                if has_py or has_compose:
+                    self.execute(f"project '{cwd}'")
+                    self.smart_stage = "understand"
+                    self.render_smart()
+                    return True
+                else:
+                    print("\nEnter the folder path or Python file for your project (or '0' for home):")
+                    self.smart_awaiting_path = True
+                    return True
+            if cmd == "2":
+                self.smart_stage = "recent"
+                self.render_smart()
+                return True
+            if cmd == "3":
+                if not self.settings:
+                    self.execute(f"project '{Path.cwd()}'")
+                self.smart_stage = "fix"
+                self.render_smart()
+                return True
+            if cmd == "4":
+                if not self.settings:
+                    self.execute(f"project '{Path.cwd()}'")
+                root = self.settings.target.root
+                print(f"Stopping container stack for project: {root}...")
+                ok, msg = SmartRecoveryCoordinator.stop_project(root, self.settings.docker_context)
+                print(msg)
+                self.render_smart()
+                return True
+            if cmd == "5":
+                self.ui_mode = "menu"
+                self.print_workbench_menu()
+                return True
+            if Path(line.strip().strip("'\"")).exists():
+                self.execute(f"project '{line.strip()}'")
+                self.smart_stage = "understand"
+                self.render_smart()
+                return True
+            print(f"Unrecognized option: '{line.strip()}'. Choose 0-5 or enter a project folder.")
+            return True
+
+        if self.smart_stage == "recent":
+            if cmd in {"0", "back", "cancel"}:
+                self.smart_stage = "home"
+                self.render_smart()
+                return True
+            if cmd.isdigit():
+                idx = int(cmd) - 1
+                projects = RecentProjectsStore.load()
+                if 0 <= idx < len(projects):
+                    self.execute(f"project '{projects[idx]}'")
+                    self.smart_stage = "understand"
+                    self.render_smart()
+                    return True
+                print(f"Invalid recent project number: {cmd}")
+                return True
+            print("Type a project number [1-9] or '0' for home.")
+            return True
+
+        if self.smart_stage == "understand":
+            if cmd in {"0", "back", "cancel", "home"}:
+                self.smart_stage = "home"
+                self.render_smart()
+                return True
+            if cmd in {"", "1", "continue", "next", "review", "prepare"}:
+                self.smart_stage = "review"
+                self.render_smart()
+                return True
+            if cmd in {"2", "fix"}:
+                self.smart_stage = "fix"
+                self.render_smart()
+                return True
+            print("Press [ENTER] or '1' to prepare deployment, '2' to fix, or '0' for Home.")
+            return True
+
+        if self.smart_stage == "review":
+            if cmd in {"0", "back", "cancel", "home"}:
+                self.smart_stage = "home"
+                self.render_smart()
+                return True
+            if cmd == "1":
+                self._stage_smart_deploy()
+                return True
+            if cmd == "2":
+                self._stage_smart_generate()
+                return True
+            if cmd == "3":
+                self.execute("preview full")
+                self.render_smart()
+                return True
+            if cmd == "4":
+                self.ui_mode = "settings"
+                self.settings_stage = "main"
+                self.render_settings()
+                return True
+            print("Choose [1] Build and Run, [2] Generate only, [3] Preview, [4] Settings, or [0] Cancel.")
+            return True
+
+        if self.smart_stage == "fix":
+            if cmd in {"0", "back", "cancel", "home"}:
+                self.smart_stage = "home"
+                self.render_smart()
+                return True
+            if self.smart_awaiting_fix:
+                self.smart_awaiting_fix = False
+                if cmd.isdigit():
+                    self._set(port=int(cmd))
+                    print(f"Application port updated to {cmd}")
+                    self.smart_stage = "understand"
+                    self.render_smart()
+                    return True
+                print(f"Invalid port: {line.strip()}")
+                return True
+            if cmd == "1":
+                print("Clearing stale locks...")
+                self.execute("unlock YES")
+                self.render_smart()
+                return True
+            if cmd == "2":
+                print("Restoring last backup...")
+                self.execute("recover YES")
+                self.render_smart()
+                return True
+            if cmd == "3":
+                curr_dep = getattr(self.settings, 'dependency_mode', 'strict')
+                new_dep = "strict" if curr_dep == "infer" else "infer"
+                self._set(dependency_mode=new_dep)
+                print(f"Dependency mode updated to: {new_dep.upper()}")
+                self.smart_stage = "understand"
+                self.render_smart()
+                return True
+            if cmd == "4":
+                print("Enter desired application port (e.g. 8000, 8080, 5000):")
+                self.smart_awaiting_fix = True
+                return True
+            print("Choose 1 (Clear locks), 2 (Restore backup), 3 (Toggle deps), 4 (Port), or 0 (Home).")
+            return True
+
+        if self.smart_stage == "result":
+            if cmd in {"0", "back", "cancel", "home"}:
+                self.smart_stage = "home"
+                self.render_smart()
+                return True
+            if cmd == "1":
+                self.execute("logs")
+                return True
+            if cmd == "2":
+                self.execute("verify")
+                return True
+            if cmd == "3":
+                self.execute("up YES")
+                return True
+            if cmd == "4":
+                root = self.settings.target.root
+                print(f"Stopping container stack for project: {root}...")
+                ok, msg = SmartRecoveryCoordinator.stop_project(root, self.settings.docker_context)
+                print(msg)
+                self.smart_stage = "home"
+                self.render_smart()
+                return True
+            print("Choose 1 (Logs), 2 (Status), 3 (Restart), 4 (Stop), or 0 (Home).")
+            return True
+
+        return True
+
     def dispatch_input(self, command_line: str) -> bool:
         line = command_line.strip()
+        name, _, _ = line.partition(" ")
+        if name.lower() in {"yes", "y", "cancel", "no"} and self.pending is not None:
+            return self.execute(line)
         if self.ui_mode == "wizard":
             return self._handle_wizard_input(line)
+        if self.ui_mode == "smart":
+            return self._handle_smart_input(line)
         if not line:
             return True
         if self.ui_mode == "browser":
@@ -5303,6 +6100,9 @@ class Console:
                 print("To cancel without making changes, type cancel.")
                 print("=" * 80)
                 return True
+        if name in {"s", "smart"}:
+            self.render_smart()
+            return True
         if name in {"a", "wizard", "quick", "autopilot", "auto-pilot"}:
             self.render_wizard()
             return True
@@ -8045,7 +8845,7 @@ def self_test() -> bool:
 
 
         def test_brand_and_version(self):
-            self.assertEqual(VERSION, "3.0.0-rc7")
+            self.assertEqual(VERSION, "3.0.0-rc8")
             _, files = self.config()
             self.assertEqual(json.loads(files["manifest.json"])["generator"], "Auto Docker")
             self.assertIn("Auto Docker", files["INSTRUCTIONS.txt"])
@@ -11488,6 +12288,138 @@ if __name__ == '__main__':
             # Must explicitly identify unverified readiness
             self.assertIn("readiness unknown / unverified", lines[0])
 
+        def test_rc8_smart_cli_entrypoint_and_path_arg(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir).resolve()
+                (repo / "app.py").write_text("print('smart cli')\n")
+                con = Console(Settings(target_for(str(repo / "app.py"))))
+                con.ui_mode = "smart"
+                con.smart_stage = "understand"
+                with patch('sys.stdout', new_callable=io.StringIO) as out:
+                    con.render_smart()
+                output = out.getvalue()
+                self.assertIn("AUTO DOCKER — SMART: Project Understanding", output)
+                self.assertIn("app.py", output)
+
+        def test_rc8_smart_home_navigation_and_cancel(self):
+            con = Console()
+            con.ui_mode = "smart"
+            con.smart_stage = "home"
+
+            # 5 switches to workbench menu
+            self.assertTrue(con.dispatch_input("5"))
+            self.assertEqual(con.ui_mode, "menu")
+
+            # Command 'smart' returns to SMART
+            self.assertTrue(con.execute("smart"))
+            self.assertEqual(con.ui_mode, "smart")
+
+            # 0 or back returns to menu
+            self.assertTrue(con.dispatch_input("0"))
+            self.assertEqual(con.ui_mode, "menu")
+
+            # q exits cleanly (returns False)
+            con.ui_mode = "smart"
+            self.assertFalse(con.dispatch_input("q"))
+
+        def test_rc8_smart_project_profile_evidence_classification(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir).resolve()
+                (repo / "app.py").write_text("import fastapi\napp = fastapi.FastAPI()\n")
+                (repo / "requirements.txt").write_text("fastapi>=0.100\n")
+
+                profile, plan = SmartDecisionEngine.analyze(repo)
+                self.assertIsNotNone(plan)
+                self.assertFalse(profile.existing_stack)
+                self.assertEqual(profile.selected_entrypoint, "app.py")
+
+                # Evidence classifications
+                status_dict = {f[0]: f[1] for f in profile.confidence_findings}
+                self.assertEqual(status_dict.get("Language / Framework"), "CONFIRMED")
+                self.assertEqual(status_dict.get("Entrypoint"), "CONFIRMED")
+                self.assertEqual(status_dict.get("Dependencies"), "CONFIRMED")
+                self.assertTrue(profile.is_ready)
+
+                # Now test unmanifested external dependency in strict mode
+                (repo / "requirements.txt").unlink()
+                profile_strict, _ = SmartDecisionEngine.analyze(repo)
+                status_strict = {f[0]: f[1] for f in profile_strict.confidence_findings}
+                self.assertEqual(status_strict.get("Dependencies"), "BLOCKED")
+                self.assertFalse(profile_strict.is_ready)
+
+        def test_rc8_smart_existing_compose_stack_reuse(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir).resolve()
+                (repo / "compose.yaml").write_text("services:\n  web:\n    image: nginx:alpine\n")
+                profile, plan = SmartDecisionEngine.analyze(repo)
+                self.assertIsNone(plan)
+                self.assertTrue(profile.existing_stack)
+                self.assertEqual(profile.selected_entrypoint, "compose.yaml")
+                self.assertEqual(profile.start_command, ("docker", "compose", "up", "-d"))
+
+        def test_rc8_smart_approval_multiline_paste_rejection(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir).resolve()
+                (repo / "app.py").write_text("print('multiline test')\n")
+                con = Console(Settings(target_for(str(repo / "app.py"))))
+                con.ui_mode = "smart"
+                con.smart_stage = "review"
+
+                # Pasting 1\nYES in a single input turn must reject approval
+                with patch('sys.stdout', new_callable=io.StringIO) as out:
+                    con.feed_input("1\nYES")
+                output = out.getvalue()
+                self.assertIn("APPROVAL REJECTED", output)
+                self.assertIsNotNone(con.pending)
+
+                # Distinct subsequent turn with YES must succeed
+                with patch('sys.stdout', new_callable=io.StringIO) as out:
+                    con.feed_input("YES")
+                self.assertIsNone(con.pending)
+                self.assertEqual(con.smart_stage, "result")
+
+        def test_rc8_smart_truthful_runtime_unverified_status(self):
+            statuses = [{'Service': 'app', 'State': 'running', 'Health': '', 'Name': 'my_app_1'}]
+            good, lines = RuntimeHealth.evaluate(['app'], False, statuses)
+            self.assertTrue(good)
+            self.assertIn("readiness unknown / unverified", lines[0])
+
+        def test_rc8_smart_remember_clean_persistence(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir).resolve()
+                store_file = repo / "smart_test_store.json"
+                with patch.object(SmartRememberStore, 'STORE_PATH', store_file):
+                    SmartRememberStore.save(repo, {
+                        "entrypoint": "main.py",
+                        "mode": "mlops",
+                        "port": 8000,
+                        "password": "SUPER_SECRET_LEAK",
+                        "api_key": "BEARER_TOKEN_LEAK",
+                    })
+                    data = SmartRememberStore.get(repo)
+                    self.assertIsNotNone(data)
+                    self.assertEqual(data["entrypoint"], "main.py")
+                    self.assertEqual(data["port"], 8000)
+                    # Secrets must be strictly omitted
+                    self.assertNotIn("password", data)
+                    self.assertNotIn("api_key", data)
+
+        def test_rc8_smart_failure_diagnosis_actionable(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir).resolve()
+                (repo / "app.py").write_text("print('diag test')\n")
+                (repo / ".opsforge-backup-20261110").mkdir()
+                findings = SmartRecoveryCoordinator.diagnose(repo)
+                self.assertTrue(any("Recoverable backup" in f for f in findings))
+
+        def test_rc8_smart_stop_and_recovery_safety(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir).resolve()
+                (repo / "app.py").write_text("print('stop test')\n")
+                # When Docker is offline, stop_project handles it gracefully without crash
+                ok, msg = SmartRecoveryCoordinator.stop_project(repo)
+                self.assertIn("Cannot stop containers", msg)
+
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(Tests)
     outcome = unittest.TextTestRunner(verbosity=2).run(suite)
     if not outcome.wasSuccessful():
@@ -11520,7 +12452,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     parser = argparse.ArgumentParser(description="Auto Docker: generate Docker infrastructure from one Python script")
     parser.add_argument("action", nargs="?", default="console", choices=(
-        "console", "wizard", "quick", "autopilot", "doctor", "existing", "native", "readiness", "preflight", "inspect", "preview", "generate", "check", "ports", "verify", "diagnose", "audit", "dryrun", "build", "up", "run", "job", "down", "ps", "logs", "recover", "unlock", "lock", "contexts", "self-test", "integration-test", "ai-integration-test", "live-test", "smoke", "cleaner", "clean"))
+        "console", "smart", "wizard", "quick", "autopilot", "doctor", "existing", "native", "readiness", "preflight", "inspect", "preview", "generate", "check", "ports", "verify", "diagnose", "audit", "dryrun", "build", "up", "run", "job", "down", "ps", "logs", "recover", "unlock", "lock", "contexts", "self-test", "integration-test", "ai-integration-test", "live-test", "smoke", "cleaner", "clean"))
     parser.add_argument("path", nargs="?", help="Project folder or exact Python .py file")
     parser.add_argument("--native-action", choices=('inspect','plan','check','ready','build','up','down','ps','logs','verify'), default='inspect',
                         help='Existing Compose project action for native mode')
@@ -11669,7 +12601,7 @@ def main(argv: list[str] | None = None) -> int:
         except OpsError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
-    if args.action not in ("console", "wizard", "quick", "autopilot") and args.path is None:
+    if args.action not in ("console", "smart", "wizard", "quick", "autopilot") and args.path is None:
         print("ERROR: Pass the explicit project path or Python file for this CLI action.", file=sys.stderr)
         return 2
     default = args.path
@@ -11713,6 +12645,13 @@ def main(argv: list[str] | None = None) -> int:
                              replicas=args.replicas, cpus=args.cpus, memory=args.memory) if default is not None else None)
         if args.action == "console":
             Console(settings, allow_insecure=args.allow_insecure).loop()
+            return 0
+        if args.action == "smart":
+            con = Console(settings, allow_insecure=args.allow_insecure)
+            con.ui_mode = "smart"
+            con.smart_stage = "understand" if settings else "home"
+            con.render_smart()
+            con.loop()
             return 0
         if args.action in ("wizard", "quick", "autopilot"):
             con = Console(settings, allow_insecure=args.allow_insecure)
