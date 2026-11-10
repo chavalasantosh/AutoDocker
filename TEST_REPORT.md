@@ -1,7 +1,7 @@
-# Auto Docker 3.0 RC8 — Test Report & Verification Evidence
+# Auto Docker 3.0 RC9 — Test Report & Verification Evidence
 
-**Date & Time**: 2026-11-10T19:15:00+05:30  
-**Application Version**: `3.0.0-rc8`  
+**Date & Time**: 2026-11-10T20:55:00+05:30  
+**Application Version**: `3.0.0-rc9`  
 **Python Runtime**: Python 3.13.14 on Windows  
 **Host Environment**: Windows 11 AMD64 (Local Docker Engine: Missing / Unavailable)  
 
@@ -9,12 +9,12 @@
 
 ## 1. Executive Summary
 
-- **Total Unit & Acceptance Tests Executed**: 339
-- **Passed**: 333
-- **Skipped**: 6 (POSIX-only pseudo-terminal and process-probing tests on Windows; all 339 pass on Linux CI)
+- **Total Unit & Acceptance Tests Executed**: 344
+- **Passed**: 338
+- **Skipped**: 6 (POSIX-only pseudo-terminal and process-probing tests on Windows; all 344 pass on Linux CI)
 - **Failed**: 0
 - **Errors**: 0
-- **Execution Time**: 30.257 seconds
+- **Execution Time**: 29.018 seconds
 
 ---
 
@@ -156,6 +156,18 @@
 | `test_rc8_smart_failure_diagnosis_actionable` | Verifies `SmartRecoveryCoordinator.diagnose` provides actionable diagnosis and suggestions for backups and stale locks. | **PASS** |
 | `test_rc8_smart_stop_and_recovery_safety` | Verifies `SmartRecoveryCoordinator.stop_project` handles offline Docker hosts gracefully and cleans only project-owned resources. | **PASS** |
 
+### 2.4 RC9 Zero-Friction Teammate Onboarding Suite (`test_rc9_*`)
+- **Total Onboarding Tests**: 5
+- **Passed**: 5, **Failed**: 0
+
+| Test Method | Description | Outcome |
+|:---|:---|:---:|
+| `test_rc9_cli_smart_dispatch_direct_path` | Verifies passing project paths directly (e.g. `main(['app.py'])`) automatically routes to SMART Mode without requiring a subcommand. | **PASS** |
+| `test_rc9_cli_guide_subcommand_and_navigation` | Verifies `main(['guide'])` and `main(['onboard'])` initialize 60-Second Guide with 4 interactive cards and `n`/`p`/`0` navigation. | **PASS** |
+| `test_rc9_prerequisite_guardian_os_tailored_guidance` | Verifies `SmartPresenter.format_prerequisite_help` provides tailored setup steps for Windows (WSL2), macOS (Apple Silicon/Intel), and Linux (curl). | **PASS** |
+| `test_rc9_port_auto_relocation_on_busy_host_port` | Verifies `SmartDecisionEngine.analyze` detects busy host ports and automatically relocates to free ports via `PortAudit.find_next_available`. | **PASS** |
+| `test_rc9_smart_home_enter_key_runs_project` | Verifies pressing Enter (empty string) on SMART Home advances to project run instead of failing. | **PASS** |
+
 ---
 
 ## 3. Real Docker Host Evidence
@@ -164,7 +176,7 @@
 - **Docker Engine Status**: Unavailable on local machine (accurately identified via `DockerHostProbe`).
 - **Docker Compose Status**: Unavailable on local machine.
 - **Evidence Assessment**:
-  - Offline inspection, environment validation, static Compose analysis, deployment planning, security audits, resource cleaner operations, guided quick-start wizard, MLOps persistent state mounts, scalability (replicas & limits), observability (Prometheus & Grafana), release blocker remediations (port ranges, multi-worker serving, safe discovery, dependency preflight), Dependency Intelligence 2.0 (stdlib immunity, 120+ PyPI package aliases, multi-manifest discovery), SMART Mode orchestration engine (profile, decision engine, presenter, recovery coordinator, remember store), and full workflow passed 100% (333 passed, 6 platform-skipped, 0 failed).
+  - Offline inspection, environment validation, static Compose analysis, deployment planning, security audits, resource cleaner operations, guided quick-start wizard, MLOps persistent state mounts, scalability (replicas & limits), observability (Prometheus & Grafana), release blocker remediations (port ranges, multi-worker serving, safe discovery, dependency preflight), Dependency Intelligence 2.0 (stdlib immunity, 120+ PyPI package aliases, multi-manifest discovery), SMART Mode orchestration engine (profile, decision engine, presenter, recovery coordinator, remember store), and Zero-Friction Teammate Onboarding engine (smart argument pre-processing, 60-Second Guide, Prerequisite Guardian, Conflict Guardian) passed 100% (338 passed, 6 platform-skipped, 0 failed).
   - Live Docker operations (`build`, `up`, `ps`, disposable container startup) could not execute against a real daemon on this machine and are **truthfully classified as BLOCKED** per Gate G7 guidelines.
   - Gate G8 and Gate G9 are marked **OFFLINE_VERIFIED / RUNTIME_BLOCKED** to clearly distinguish verified offline simulation and state-machine tests from unperformed live container runs.
 
@@ -181,7 +193,7 @@
 | **G5** | Deployment plan is deterministic | **PASS** | `DeploymentPlan` generated with topological sort and repeatable JSON export |
 | **G6** | Security and resource checks produce correct classifications | **PASS** | Privileged containers, socket mounts, and 0.0.0.0 DB ports correctly rated `CRITICAL`; security gate enforced; override resets on switch |
 | **G7** | Real Docker builds and startup pass on a supported host | **BLOCKED** | Docker Engine is not installed on the test host environment |
-| **G8** | Application-specific readiness tests pass | **OFFLINE_VERIFIED / RUNTIME_BLOCKED** | Service role classification, dependency graph, cleaner verification, and multi-worker serving verified offline (339 tests). Live runtime execution blocked by host Docker absence |
+| **G8** | Application-specific readiness tests pass | **OFFLINE_VERIFIED / RUNTIME_BLOCKED** | Service role classification, dependency graph, cleaner verification, and multi-worker serving verified offline (344 tests). Live runtime execution blocked by host Docker absence |
 | **G9** | Failure recovery and cleanup are verified | **OFFLINE_VERIFIED / RUNTIME_BLOCKED** | State machine lifecycle, scoped cleanup, and `ResourceCleaner` verified across all sequential scenarios; live container rollback blocked by host Docker absence |
 | **G10** | Single-file distribution is reproducible | **PASS** | `auto_docker.py` remains 100% self-contained in a single executable script; zero nested input calls |
 | **G11** | Guided Quick-Start Wizard & MLOps State Persistence | **PASS** | 3-step interactive Auto-Pilot wizard (`Detect -> Configure -> Safe Deploy`), MLOps volume mounting for `artifacts/` and `models/`, accurate AST scope check |
@@ -189,3 +201,4 @@
 | **G13** | Release Blocker Remediation & Safe Discovery | **PASS** | Multi-worker factory serving, replica port ranges, strict slug/label discovery, orphan isolation, non-zero cleaner exit on missing Docker, dependency blocking |
 | **G14** | Dependency Intelligence 2.0 & Deployment Reliability Engine | **PASS** | Standard library immunity; 120+ PyPI package and alias mappings; multi-manifest discovery (setup.cfg, setup.py, Pipfile, environment.yml); unverified container differentiation; Wizard custom execution command Option [9]; expanded persistent storage |
 | **G15** | SMART Mode Orchestration & One-Command Intelligent Deployment | **PASS** | Full 6-phase SMART Mode orchestration (`auto_docker.py smart [path]`), evidence classification, immutable approval digest, multiline paste safety, truthful runtime health, safe preference memory (`SmartRememberStore`), and recovery coordinator |
+| **G16** | Zero-Friction Teammate Onboarding & Prerequisite Guardian | **PASS** | Direct-path argument routing (`python auto_docker.py [path]`), default CLI action 'smart', interactive 60-Second Teammate Guide (`guide`/`onboard`), Prerequisite Guardian OS setup steps (Windows/Mac/Linux), Conflict Guardian port auto-relocation, and TEAM_ONBOARDING.md |

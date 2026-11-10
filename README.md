@@ -2,11 +2,13 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-brightgreen.svg)](pyproject.toml)
-[![Release](https://img.shields.io/badge/Release-3.0.0--rc8-orange.svg)](RELEASE_NOTES.md)
+[![Release](https://img.shields.io/badge/Release-3.0.0--rc9-orange.svg)](RELEASE_NOTES.md)
 [![Dependencies](https://img.shields.io/badge/Dependencies-Zero%20(Stdlib%20Only)-success.svg)](requirements.txt)
-[![Tests](https://img.shields.io/badge/Tests-339%20Passed%20(100%25)-brightgreen.svg)](TEST_REPORT.md)
+[![Tests](https://img.shields.io/badge/Tests-344%20Passed%20(100%25)-brightgreen.svg)](TEST_REPORT.md)
 
 > **Autonomous, zero-dependency container infrastructure generator, resource cleaner, and deployment orchestrator in a single Python executable.**
+>
+> 📖 **New to Docker or just joined the team?** Read our 60-second [New Teammate Guide](TEAM_ONBOARDING.md).
 
 **Auto Docker** transforms any Python, ML, GenAI, or multi-service codebase into hardened, reproducible Docker and Docker Compose environments in seconds. It requires **zero third-party pip dependencies**, never touches or overwrites your source code, enforces strict loopback network security, and provides an intelligent **SMART Mode** alongside an interactive terminal workbench and 3-step Auto-Pilot wizard.
 
@@ -41,26 +43,33 @@
 
 ## Quickstart
 
-### 1. SMART Mode (Recommended for Beginners)
-Launch intelligent one-command deployment on any project folder:
+### 1. SMART Mode (Zero Docker Knowledge Required)
+Run Auto Docker directly on any project folder:
 
 ```bash
-python auto_docker.py smart
-# or specify the project directly
-python auto_docker.py smart /path/to/project
+# Run in the current folder (press Enter to launch!)
+python auto_docker.py
+
+# Or specify a project path or Python script directly
+python auto_docker.py /path/to/project
+python auto_docker.py my_app.py
+
+# View the interactive 60-second Teammate Guide
+python auto_docker.py guide
 ```
 
 SMART Mode automatically:
 1. **Understands your project**: Detects framework, entrypoint, dependencies, ports, and storage with clear `CONFIRMED` / `INFERRED` / `BLOCKED` evidence.
-2. **Prepares deployment safely**: Generates `.opsforge/Dockerfile` and `compose.yaml` (or reuses existing Compose infrastructure without overwriting).
-3. **One Approval**: Stages immutable deployment review and requires explicit confirmation.
-4. **Verifies Runtime**: Distinguishes verified healthy services from unverified containers without healthchecks.
+2. **Conflict Guardian**: Detects occupied ports and automatically relocates to free ports with zero collision.
+3. **Prepares deployment safely**: Generates `.opsforge/Dockerfile` and `compose.yaml` (or reuses existing Compose infrastructure without overwriting).
+4. **One Approval**: Stages immutable deployment review and requires explicit confirmation.
+5. **Verifies Runtime**: Distinguishes verified healthy services from unverified containers without healthchecks.
 
 ### 2. Interactive Terminal Workbench
-Run with no arguments to launch the full developer workbench:
+Run with `console` to access the full developer workbench:
 
 ```bash
-python auto_docker.py
+python auto_docker.py console
 ```
 
 ### 3. Auto-Pilot 3-Step Wizard

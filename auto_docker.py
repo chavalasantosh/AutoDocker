@@ -46,7 +46,7 @@ import platform
 from enum import Enum
 from typing import Any, Iterator
 
-VERSION = "3.0.0-rc8"
+VERSION = "3.0.0-rc9"
 LOG = logging.getLogger("auto_docker")
 OUTPUT = ".opsforge"
 MAX_VISITED = 3000
@@ -3488,6 +3488,19 @@ class PortAudit:
         return True, 'available now (not reserved; another process may claim it)'
 
     @classmethod
+    def find_next_available(cls, start_port: int, max_attempts: int = 25) -> int:
+        """Finds the next free loopback port without conflicts."""
+        for offset in range(max_attempts):
+            candidate = start_port + offset
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.bind(('127.0.0.1', candidate))
+                return candidate
+            except OSError:
+                continue
+        return start_port
+
+    @classmethod
     def report(cls, ports: tuple[PublishedPort, ...]) -> list[tuple[PublishedPort, bool, str]]:
         return [(mapping, *cls.check(mapping)) for mapping in ports]
 
@@ -4256,16 +4269,20 @@ class SmartDecisionEngine:
         else:
             confidence_findings.append(("Persistent Storage", "UNKNOWN", "No dedicated data/model directories found (standard container storage)"))
 
-        # Port conflicts
+        # Port conflicts and auto-relocation
         ports_list: list[tuple[str, int, int]] = []
         if plan.published_ports:
-            for p in plan.published_ports:
-                ports_list.append((p.service, p.host, p.container))
             port_report = PortAudit.report(plan.published_ports)
             for mapping, ok, detail in port_report:
                 if not ok:
-                    risk_findings.append(f"Port conflict: host port {mapping.host} is already in use: {detail}")
-                    recommendations.append(f"Host port {mapping.host} is occupied; select an alternate port.")
+                    alt_port = PortAudit.find_next_available(mapping.host + 1)
+                    ports_list.append((mapping.service, alt_port, mapping.container))
+                    confidence_findings.append(("Application Port", "INFERRED", f"Port {mapping.host} occupied ({detail}); auto-relocated to {alt_port}"))
+                    risk_findings.append(f"Port conflict: host port {mapping.host} occupied ({detail}); auto-relocated to {alt_port}")
+                    recommendations.append(f"Host port {mapping.host} was busy; your application will run at http://localhost:{alt_port}")
+                else:
+                    ports_list.append((mapping.service, mapping.host, mapping.container))
+                    confidence_findings.append(("Application Port", "CONFIRMED", f"Port {mapping.host} -> {mapping.container} ({mapping.service}) available"))
 
         is_ready = len(unresolved) == 0 and not any(f[1] == "BLOCKED" for f in confidence_findings if f[0] == "Dependencies")
 
@@ -4299,27 +4316,171 @@ class SmartPresenter:
     def format_home(cls, current_project: Path | None = None, recent_count: int = 0, probe: DockerHostStatus | None = None) -> str:
         lines = [
             "=" * 80,
-            "AUTO DOCKER — SMART MODE: One-Command Intelligent Deployment",
+            "AUTO DOCKER — Zero-Friction Project Launcher (SMART Mode)",
             "=" * 80,
-            "Welcome! Deploy any Python application or Docker stack with zero hassle.",
+            "Welcome! Run any Python application or Docker stack with zero container knowledge.",
         ]
         if current_project:
             lines.append(f"Current Project: {current_project}")
         else:
-            lines.append(f"Terminal Folder: {Path.cwd()} (not selected)")
+            lines.append(f"Working Folder : {Path.cwd()}")
         if probe:
-            lines.append(f"Docker Status  : {probe.summary}")
+            if not probe.cli_installed or not probe.engine_reachable:
+                lines.append("Docker Status  : ⚠️  Docker not running yet (Choose [3] for 1-click setup guide)")
+            else:
+                lines.append(f"Docker Status  : ✅ Ready ({probe.server_version or 'Docker Engine active'})")
         lines.extend([
             "-" * 80,
             "What would you like to do?",
-            "  [1] Run my project (Auto-Detect, Prepare, and Launch)",
-            f"  [2] Open a recent project ({recent_count} available)",
-            "  [3] Check or fix a project (Diagnose problems & recover)",
-            "  [4] Stop a running project (Safe shutdown with zero leftovers)",
-            "  [5] Advanced Workbench (Full developer settings & manual tools)",
+            "  [1] 🚀 Run my project (Auto-Detect, Prepare, and Launch)",
+            "  [2] 📚 60-Second Teammate Guide (How this works in plain English)",
+            "  [3] 🔍 System & Docker Setup Doctor (Step-by-step setup assistance)",
+            f"  [4] 📂 Recent projects ({recent_count} available)",
+            "  [5] 🛠️ Advanced Developer Workbench (Full developer settings & manual tools)",
             "  [0] Exit",
             "-" * 80,
-            "Choose an option [0-5]:",
+            "Choose an option [0-5] or press [ENTER] to Run:",
+            "=" * 80,
+        ])
+        return "\n".join(lines)
+
+    @classmethod
+    def format_guide(cls, step: int = 1) -> str:
+        step = max(1, min(4, step))
+        lines = [
+            "\n" + "=" * 80,
+            f"AUTO DOCKER — 60-Second Teammate Guide [Card {step} of 4]",
+            "=" * 80,
+        ]
+        if step == 1:
+            lines.extend([
+                "💡 CARD 1: What is a Container? (The Plain English Version)",
+                "-" * 80,
+                "Think of a container like an instant virtual laptop inside your computer.",
+                "",
+                "• It has clean Python and all needed libraries already installed.",
+                "• It runs your code in an isolated room so nothing conflicts.",
+                "• It guarantees your code works the exact same way on your computer,",
+                "  on your teammates' computers, and in production.",
+                "",
+                "👉 The big win: You will NEVER hear or say 'It works on my machine' again!",
+            ])
+        elif step == 2:
+            lines.extend([
+                "🚀 CARD 2: How Do I Run My Work? (One Simple Command)",
+                "-" * 80,
+                "You don't need to write Dockerfiles or remember complicated commands.",
+                "",
+                "1. Open your terminal in your project folder.",
+                "2. Type this one command:",
+                "       python auto_docker.py",
+                "3. Press [ENTER].",
+                "",
+                "Auto Docker automatically:",
+                "  ✓ Finds your entrypoint (like app.py or main.py)",
+                "  ✓ Resolves your dependencies (requirements.txt / pyproject.toml)",
+                "  ✓ Sets up safe ports (e.g. 8000) and launches everything.",
+                "  ✓ If it's a web app, you get a clickable link: http://localhost:8000",
+            ])
+        elif step == 3:
+            lines.extend([
+                "💾 CARD 3: Where Do My Files and Models Go?",
+                "-" * 80,
+                "New teammates often worry: 'If the container stops, do I lose my work?'",
+                "",
+                "NO! Your files are 100% safe:",
+                "• All folders where your app saves files (like 'artifacts/', 'models/',",
+                "  'data/', or 'logs/') are linked directly to your computer.",
+                "• When your code writes a file inside the container, it appears immediately",
+                "  in your local folder on your computer.",
+                "• Stopping or restarting the container will NEVER delete your data or models.",
+            ])
+        elif step == 4:
+            lines.extend([
+                "🛑 CARD 4: How Do I Stop, Restart, or Fix Things?",
+                "-" * 80,
+                "• To STOP your project:",
+                "  Run: python auto_docker.py down",
+                "  Auto Docker shuts down all containers and leaves ZERO leftover junk.",
+                "",
+                "• If your code has an ERROR:",
+                "  Auto Docker reads the crash log and tells you the exact file and line",
+                "  number in your Python code in plain English. Just edit your code and",
+                "  hit [ENTER] to run again!",
+                "",
+                "🎉 That's it! You now know everything needed to run your work on this team.",
+            ])
+        lines.extend([
+            "-" * 80,
+            "Navigation: [n] Next Card | [p] Previous Card | [1] Run My Project | [0] SMART Home",
+            "=" * 80,
+        ])
+        return "\n".join(lines)
+
+    @classmethod
+    def format_prerequisite_help(cls, probe: DockerHostStatus | None = None) -> str:
+        import platform
+        system = platform.system().lower()
+        lines = [
+            "\n" + "=" * 80,
+            "AUTO DOCKER — System & Docker Setup Doctor",
+            "=" * 80,
+        ]
+        if probe and probe.cli_installed and probe.engine_reachable:
+            lines.extend([
+                "✅ DOCKER IS READY AND RUNNING!",
+                "-" * 80,
+                f"• Docker Engine version : {probe.server_version or 'detected'}",
+                f"• Docker CLI binary     : {probe.cli_path or 'docker'}",
+                f"• Docker Compose version: {probe.compose_version or 'detected'}",
+                "",
+                "Your computer is 100% ready to run projects. Press [ENTER] to launch!",
+            ])
+        else:
+            lines.extend([
+                "⚠️ DOCKER IS NOT RUNNING YET",
+                "-" * 80,
+                "Docker is the engine that runs your project inside a clean, pre-packaged room.",
+                "Don't worry—getting it set up is a one-time 2-minute step:",
+                "",
+            ])
+            if "windows" in system:
+                lines.extend([
+                    "👉 WINDOWS SETUP STEPS:",
+                    "  1. If already installed: Open 'Docker Desktop' from your Start Menu.",
+                    "  2. If not installed yet: Download Docker Desktop for Windows:",
+                    "     https://www.docker.com/products/docker-desktop/",
+                    "  3. Run the installer and keep 'Use WSL 2 instead of Hyper-V' checked.",
+                    "  4. Restart your computer if prompted, then open Docker Desktop.",
+                    "  5. Once the Docker whale icon in your taskbar turns steady, you're ready!",
+                ])
+            elif "darwin" in system:
+                lines.extend([
+                    "👉 MACOS SETUP STEPS:",
+                    "  1. If already installed: Open 'Docker' from your Applications folder.",
+                    "  2. If not installed yet: Download Docker Desktop for Mac:",
+                    "     https://www.docker.com/products/docker-desktop/",
+                    "     (Select 'Apple Silicon' for M1/M2/M3/M4 or 'Intel Chip')",
+                    "  3. Drag Docker to Applications and open it once to grant permissions.",
+                ])
+            else:
+                lines.extend([
+                    "👉 LINUX SETUP STEPS:",
+                    "  1. Install Docker with one official command:",
+                    "     curl -fsSL https://get.docker.com | sh",
+                    "  2. Add your current user so you don't need sudo:",
+                    "     sudo usermod -aG docker $USER",
+                    "  3. Start the Docker service:",
+                    "     sudo systemctl start docker",
+                ])
+            lines.extend([
+                "",
+                "💡 Note: Auto Docker can still inspect your project and generate all your",
+                "   configuration files in .opsforge/ right now even before Docker is open!",
+            ])
+        lines.extend([
+            "-" * 80,
+            "Press [ENTER] or '0' to return to SMART Home:",
             "=" * 80,
         ])
         return "\n".join(lines)
@@ -4484,6 +4645,7 @@ class Console:
         self.wizard_awaiting_port: bool = False
         self.wizard_awaiting_command: bool = False
         self.smart_stage: str = "home"
+        self.smart_guide_step: int = 1
         self.smart_profile: SmartProjectProfile | None = None
         self.smart_plan: Plan | None = None
         self.smart_last_result: str = ""
@@ -5469,12 +5631,18 @@ class Console:
     def render_smart(self) -> None:
         self.ui_mode = "smart"
         if self.smart_stage == "home":
-            if self.settings:
-                self.smart_stage = "understand"
-                self.render_smart()
-                return
             probe = DockerHostProbe.probe(context=self.settings.docker_context if self.settings else None)
-            print(SmartPresenter.format_home(None, len(self.recent_projects), probe))
+            proj = self.settings.target.root if self.settings else None
+            print(SmartPresenter.format_home(proj, len(self.recent_projects), probe))
+            return
+
+        if self.smart_stage == "guide":
+            print(SmartPresenter.format_guide(self.smart_guide_step))
+            return
+
+        if self.smart_stage == "doctor":
+            probe = DockerHostProbe.probe(context=self.settings.docker_context if self.settings else None)
+            print(SmartPresenter.format_prerequisite_help(probe))
             return
 
         if self.smart_stage == "understand":
@@ -5603,6 +5771,44 @@ class Console:
             self.print_workbench_menu()
             return True
 
+        if self.smart_stage == "guide":
+            if cmd in {"n", "next", ""}:
+                if self.smart_guide_step < 4:
+                    self.smart_guide_step += 1
+                    self.render_smart()
+                    return True
+                else:
+                    self.smart_stage = "home"
+                    self.render_smart()
+                    return True
+            if cmd in {"p", "prev", "previous", "back"}:
+                if self.smart_guide_step > 1:
+                    self.smart_guide_step -= 1
+                    self.render_smart()
+                    return True
+                else:
+                    self.smart_stage = "home"
+                    self.render_smart()
+                    return True
+            if cmd == "1":
+                self.smart_stage = "home"
+                return self._handle_smart_input("1")
+            if cmd in {"0", "q", "quit", "exit", "home", "cancel"}:
+                self.smart_stage = "home"
+                self.render_smart()
+                return True
+            self.render_smart()
+            return True
+
+        if self.smart_stage == "doctor":
+            if cmd in {"0", "back", "cancel", "home", "q", "quit", "exit", ""}:
+                self.smart_stage = "home"
+                self.render_smart()
+                return True
+            self.smart_stage = "home"
+            self.render_smart()
+            return True
+
         if self.smart_stage == "home":
             if cmd in {"0", "back", "cancel"}:
                 self.ui_mode = "menu"
@@ -5617,12 +5823,13 @@ class Console:
                 self.smart_stage = "understand"
                 self.render_smart()
                 return True
-            if cmd == "1":
-                cwd = Path.cwd()
-                has_py = any(cwd.glob("*.py"))
-                has_compose = any((cwd / f).is_file() for f in ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"))
+            if cmd in {"1", ""}:
+                target_dir = self.settings.target.root if self.settings else Path.cwd()
+                has_py = any(target_dir.glob("*.py"))
+                has_compose = any((target_dir / f).is_file() for f in ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"))
                 if has_py or has_compose:
-                    self.execute(f"project '{cwd}'")
+                    if not self.settings or self.settings.target.root != target_dir:
+                        self.execute(f"project '{target_dir}'")
                     self.smart_stage = "understand"
                     self.render_smart()
                     return True
@@ -5630,17 +5837,24 @@ class Console:
                     print("\nEnter the folder path or Python file for your project (or '0' for home):")
                     self.smart_awaiting_path = True
                     return True
-            if cmd == "2":
+            if cmd in {"2", "g", "guide", "onboard", "learn"}:
+                self.smart_stage = "guide"
+                self.smart_guide_step = 1
+                self.render_smart()
+                return True
+            if cmd in {"3", "d", "doctor", "setup"}:
+                self.smart_stage = "doctor"
+                self.render_smart()
+                return True
+            if cmd in {"4", "r", "recent"}:
                 self.smart_stage = "recent"
                 self.render_smart()
                 return True
-            if cmd == "3":
-                if not self.settings:
-                    self.execute(f"project '{Path.cwd()}'")
-                self.smart_stage = "fix"
-                self.render_smart()
+            if cmd in {"5", "workbench", "advanced", "console", "menu"}:
+                self.ui_mode = "menu"
+                self.print_workbench_menu()
                 return True
-            if cmd == "4":
+            if cmd in {"stop", "down"}:
                 if not self.settings:
                     self.execute(f"project '{Path.cwd()}'")
                 root = self.settings.target.root
@@ -5649,9 +5863,11 @@ class Console:
                 print(msg)
                 self.render_smart()
                 return True
-            if cmd == "5":
-                self.ui_mode = "menu"
-                self.print_workbench_menu()
+            if cmd in {"fix", "diagnose"}:
+                if not self.settings:
+                    self.execute(f"project '{Path.cwd()}'")
+                self.smart_stage = "fix"
+                self.render_smart()
                 return True
             if Path(line.strip().strip("'\"")).exists():
                 self.execute(f"project '{line.strip()}'")
@@ -6635,7 +6851,8 @@ class Console:
     def feed_input(self, text: str) -> bool:
         """Process a single user input turn containing one or more lines."""
         self.input_turn += 1
-        for command_line in text.splitlines():
+        lines = text.splitlines() or [""]
+        for command_line in lines:
             if not self.dispatch_input(command_line):
                 return False
         return True
@@ -8845,7 +9062,7 @@ def self_test() -> bool:
 
 
         def test_brand_and_version(self):
-            self.assertEqual(VERSION, "3.0.0-rc8")
+            self.assertEqual(VERSION, "3.0.0-rc9")
             _, files = self.config()
             self.assertEqual(json.loads(files["manifest.json"])["generator"], "Auto Docker")
             self.assertIn("Auto Docker", files["INSTRUCTIONS.txt"])
@@ -12428,6 +12645,98 @@ if __name__ == '__main__':
                     self.assertFalse(ok)
                     self.assertIn("Cannot stop containers", msg)
 
+        def test_rc9_cli_smart_dispatch_direct_path(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir).resolve()
+                (repo / "app.py").write_text("print('direct path')\n")
+                with patch.object(Console, 'loop') as mock_loop:
+                    code = main([str(repo / "app.py")])
+                    self.assertEqual(code, 0)
+                    mock_loop.assert_called_once()
+
+        def test_rc9_cli_guide_subcommand_and_navigation(self):
+            con = Console()
+            con.ui_mode = "smart"
+            con.smart_stage = "guide"
+            con.smart_guide_step = 1
+
+            with patch('sys.stdout', new_callable=io.StringIO) as out:
+                con.render_smart()
+            self.assertIn("CARD 1", out.getvalue())
+
+            # 'n' advances to step 2
+            con.feed_input("n")
+            self.assertEqual(con.smart_guide_step, 2)
+
+            # 'n' advances to step 3 and 4
+            con.feed_input("n")
+            self.assertEqual(con.smart_guide_step, 3)
+            con.feed_input("n")
+            self.assertEqual(con.smart_guide_step, 4)
+
+            # 'p' steps back to 3
+            con.feed_input("p")
+            self.assertEqual(con.smart_guide_step, 3)
+
+            # '0' or 'home' returns to home
+            con.feed_input("0")
+            self.assertEqual(con.smart_stage, "home")
+
+        def test_rc9_prerequisite_guardian_os_tailored_guidance(self):
+            offline_probe = DockerHostStatus(False, None, False, None, False, None, "missing")
+            with patch("platform.system", return_value="Windows"):
+                win_text = SmartPresenter.format_prerequisite_help(offline_probe)
+                self.assertIn("Docker Desktop for Windows", win_text)
+                self.assertIn("WSL 2", win_text)
+
+            with patch("platform.system", return_value="Darwin"):
+                mac_text = SmartPresenter.format_prerequisite_help(offline_probe)
+                self.assertIn("Docker Desktop for Mac", mac_text)
+                self.assertIn("Apple Silicon", mac_text)
+
+            with patch("platform.system", return_value="Linux"):
+                linux_text = SmartPresenter.format_prerequisite_help(offline_probe)
+                self.assertIn("curl -fsSL https://get.docker.com", linux_text)
+
+            online_probe = DockerHostStatus(True, "/usr/bin/docker", True, "24.0.5", True, None, None)
+            ready_text = SmartPresenter.format_prerequisite_help(online_probe)
+            self.assertIn("DOCKER IS READY AND RUNNING", ready_text)
+
+        def test_rc9_port_auto_relocation_on_busy_host_port(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir).resolve()
+                (repo / "app.py").write_text("import fastapi\napp = fastapi.FastAPI()\n")
+                (repo / "requirements.txt").write_text("fastapi>=0.100\n")
+
+                # Bind loopback port 8000
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as busy_sock:
+                    try:
+                        busy_sock.bind(('127.0.0.1', 8000))
+                    except OSError:
+                        # If 8000 already bound externally, proceed
+                        pass
+                    profile, plan = SmartDecisionEngine.analyze(repo)
+                    self.assertIsNotNone(plan)
+                    # Port should be found or relocated
+                    self.assertTrue(len(profile.published_ports) > 0)
+                    ports = [p[1] for p in profile.published_ports]
+                    # Host port is free to use
+                    for port in ports:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                            s.bind(('127.0.0.1', port))
+
+        def test_rc9_smart_home_enter_key_runs_project(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir).resolve()
+                (repo / "app.py").write_text("print('enter run')\n")
+                con = Console(Settings(target_for(str(repo))))
+                con.ui_mode = "smart"
+                con.smart_stage = "home"
+
+                # Hitting enter (empty string) on home runs project
+                con.feed_input("")
+                self.assertEqual(con.smart_stage, "understand")
+
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(Tests)
     outcome = unittest.TextTestRunner(verbosity=2).run(suite)
     if not outcome.wasSuccessful():
@@ -12458,9 +12767,27 @@ def main(argv: list[str] | None = None) -> int:
     if not compat:
         print(compat_msg, file=sys.stderr)
         return 1
+
+    # Zero-friction beginner CLI: preprocess arguments
+    if argv is None:
+        argv = sys.argv[1:]
+    else:
+        argv = list(argv)
+
+    KNOWN_ACTIONS = {
+        "console", "smart", "guide", "onboard", "wizard", "quick", "autopilot", "doctor",
+        "existing", "native", "readiness", "preflight", "inspect", "preview", "generate",
+        "check", "ports", "verify", "diagnose", "audit", "dryrun", "build", "up", "run",
+        "job", "down", "ps", "logs", "recover", "unlock", "lock", "contexts", "self-test",
+        "integration-test", "ai-integration-test", "live-test", "smoke", "cleaner", "clean"
+    }
+
+    if argv and not argv[0].startswith("-") and argv[0] not in KNOWN_ACTIONS:
+        argv = ["smart", argv[0]] + argv[1:]
+
     parser = argparse.ArgumentParser(description="Auto Docker: generate Docker infrastructure from one Python script")
-    parser.add_argument("action", nargs="?", default="console", choices=(
-        "console", "smart", "wizard", "quick", "autopilot", "doctor", "existing", "native", "readiness", "preflight", "inspect", "preview", "generate", "check", "ports", "verify", "diagnose", "audit", "dryrun", "build", "up", "run", "job", "down", "ps", "logs", "recover", "unlock", "lock", "contexts", "self-test", "integration-test", "ai-integration-test", "live-test", "smoke", "cleaner", "clean"))
+    parser.add_argument("action", nargs="?", default="smart", choices=(
+        "smart", "console", "guide", "onboard", "wizard", "quick", "autopilot", "doctor", "existing", "native", "readiness", "preflight", "inspect", "preview", "generate", "check", "ports", "verify", "diagnose", "audit", "dryrun", "build", "up", "run", "job", "down", "ps", "logs", "recover", "unlock", "lock", "contexts", "self-test", "integration-test", "ai-integration-test", "live-test", "smoke", "cleaner", "clean"))
     parser.add_argument("path", nargs="?", help="Project folder or exact Python .py file")
     parser.add_argument("--native-action", choices=('inspect','plan','check','ready','build','up','down','ps','logs','verify'), default='inspect',
                         help='Existing Compose project action for native mode')
@@ -12651,6 +12978,14 @@ def main(argv: list[str] | None = None) -> int:
                              args.health_path, args.python_image,
                              tuple(sorted(service_image_overrides.items())),
                              replicas=args.replicas, cpus=args.cpus, memory=args.memory) if default is not None else None)
+        if args.action in ("guide", "onboard"):
+            con = Console(settings, allow_insecure=args.allow_insecure)
+            con.ui_mode = "smart"
+            con.smart_stage = "guide"
+            con.smart_guide_step = 1
+            con.render_smart()
+            con.loop()
+            return 0
         if args.action == "console":
             Console(settings, allow_insecure=args.allow_insecure).loop()
             return 0

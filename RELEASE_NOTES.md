@@ -1,3 +1,38 @@
+# Auto Docker 3.0 RC9 — Release Notes
+
+## Version Overview
+- **Release**: Auto Docker 3.0 RC9 (Zero-Friction Teammate Onboarding Release)
+- **Architecture**: Single-file Python standard-library automation (`auto_docker.py`)
+- **Key Focus**: Making Auto Docker 100% effortless, intuitive, and welcoming for **any teammate who has zero knowledge of Docker, containers, networks, or YAML**.
+
+---
+
+## What's New in 3.0 RC9 (Zero-Friction Onboarding)
+
+### 1. Direct-Path Command Line Dispatch
+- **No Subcommand Required**: Teammates can type `python auto_docker.py my_project` or `python auto_docker.py app.py` directly. Auto Docker automatically detects that the argument is a project path and routes straight into SMART Mode.
+- **Default SMART Mode**: Running `python auto_docker.py` with no arguments defaults to SMART Mode rather than the 13-item advanced workbench.
+
+### 2. Interactive 60-Second Teammate Guide (`python auto_docker.py guide`)
+- Built-in 4-card interactive terminal onboarding walk-through:
+  - **Card 1: What is a Container?** Explains containers with zero jargon as clean virtual laptops that eliminate "it works on my machine".
+  - **Card 2: How Do I Run My Work?** Demonstrates the 1-command workflow (`python auto_docker.py` -> hit Enter).
+  - **Card 3: Where Do My Files and Models Go?** Reassures new hires that outputs in `artifacts/`, `models/`, and `data/` are safely synced to their local computer and never lost.
+  - **Card 4: How Do I Stop, Restart, or Fix Things?** Explains clean container stopping and plain-English code crash diagnostics.
+
+### 3. Prerequisite Guardian & Setup Doctor (`python auto_docker.py doctor`)
+- Detects the teammate's host operating system (Windows, macOS, Linux) and provides tailored, 1-click step-by-step instructions to get Docker Desktop running.
+- Reassures teammates that Auto Docker can inspect and generate all configuration files offline even before Docker Desktop is launched.
+
+### 4. Conflict Guardian (Automatic Port Relocation)
+- Automatically tests published host ports (e.g. 8000) for conflicts.
+- If a port is occupied by another local application, Auto Docker automatically relocates to the next free port (e.g. 8001) using `PortAudit.find_next_available`, eliminating `EADDRINUSE` crashes.
+
+### 5. Dedicated `TEAM_ONBOARDING.md`
+- Added comprehensive zero-jargon quickstart documentation in the repository root for new team members.
+
+---
+
 # Auto Docker 3.0 RC8 — Release Notes
 
 ## Version Overview
