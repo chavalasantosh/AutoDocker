@@ -120,6 +120,14 @@ class Target:
     root: Path
     pinned: str | None = None
 
+    def __post_init__(self) -> None:
+        p = Path(self.root)
+        try:
+            resolved = p.resolve()
+        except Exception:
+            resolved = p
+        object.__setattr__(self, "root", resolved)
+
 
 @dataclasses.dataclass(frozen=True)
 class Candidate:
@@ -1384,12 +1392,11 @@ class DependencyAudit:
         for warning in report.warnings:
             print("  WARNING: " + warning)
         print("  Imports are inspected without executing your app. Review the project's dependency manifest before building.")
-        print("  Imports are inspected without executing your app. Review the project's dependency manifest before building.")
 
 
 class Inspector:
     def inspect(self, target: Target, entry: str | None = None) -> Inspection:
-        root = target.root
+        root = target.root.resolve()
         selected = entry or target.pinned
         if selected:
             selected = selected.replace("\\", "/").strip().strip('"\'')
@@ -1511,10 +1518,16 @@ class DockerStorageProbe:
     """
 
     _mock_storage_status: DockerStorageStatus | None = None
+    _cache: dict[str | None, DockerStorageStatus] = {}
 
     @classmethod
     def set_mock(cls, status: DockerStorageStatus | None) -> None:
         cls._mock_storage_status = status
+        cls.clear_cache()
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        cls._cache.clear()
 
     @classmethod
     def _parse_df_size(cls, raw: str) -> int:
@@ -1536,13 +1549,16 @@ class DockerStorageProbe:
         return int(val * multipliers.get(unit, 1))
 
     @classmethod
-    def probe(cls, context: str | None = None, timeout: float = 2.0) -> DockerStorageStatus:
+    def probe(cls, context: str | None = None, timeout: float = 2.0, bypass_cache: bool = False) -> DockerStorageStatus:
         if cls._mock_storage_status is not None:
             return cls._mock_storage_status
 
+        if not bypass_cache and context in cls._cache:
+            return cls._cache[context]
+
         docker_cli = shutil.which("docker")
         if not docker_cli:
-            return DockerStorageStatus(
+            res_status = DockerStorageStatus(
                 engine_accessible=False,
                 docker_root_dir=None,
                 storage_driver=None,
@@ -1555,6 +1571,9 @@ class DockerStorageProbe:
                 assessment_status="UNKNOWN",
                 details="Docker CLI not found on host PATH"
             )
+            if not bypass_cache:
+                cls._cache[context] = res_status
+            return res_status
 
         prefix = [docker_cli]
         if context:
@@ -1574,7 +1593,7 @@ class DockerStorageProbe:
                 pass
 
         if is_remote:
-            return DockerStorageStatus(
+            res_status = DockerStorageStatus(
                 engine_accessible=True,
                 docker_root_dir=None,
                 storage_driver=None,
@@ -1587,6 +1606,9 @@ class DockerStorageProbe:
                 assessment_status="UNKNOWN",
                 details=f"Remote Docker context '{context}'; storage metrics reside on remote host"
             )
+            if not bypass_cache:
+                cls._cache[context] = res_status
+            return res_status
 
         # Probe Docker Info
         try:
@@ -1595,7 +1617,7 @@ class DockerStorageProbe:
             if res.returncode != 0:
                 err = (res.stderr or res.stdout or "").strip().splitlines()
                 detail = err[-1][:120] if err else "Docker daemon unreachable"
-                return DockerStorageStatus(
+                res_status = DockerStorageStatus(
                     engine_accessible=False,
                     docker_root_dir=None,
                     storage_driver=None,
@@ -1608,11 +1630,14 @@ class DockerStorageProbe:
                     assessment_status="UNKNOWN",
                     details=f"Docker daemon unreachable ({detail})"
                 )
+                if not bypass_cache:
+                    cls._cache[context] = res_status
+                return res_status
             parts = res.stdout.strip().split("|")
             root_dir = parts[0].strip() if len(parts) > 0 else None
             driver = parts[1].strip() if len(parts) > 1 else None
         except Exception as exc:
-            return DockerStorageStatus(
+            res_status = DockerStorageStatus(
                 engine_accessible=False,
                 docker_root_dir=None,
                 storage_driver=None,
@@ -1625,6 +1650,9 @@ class DockerStorageProbe:
                 assessment_status="UNKNOWN",
                 details=f"Failed to query Docker daemon info: {exc}"
             )
+            if not bypass_cache:
+                cls._cache[context] = res_status
+            return res_status
 
         # Inspect reclaimable space via docker system df
         reclaimable_cache = 0
@@ -1689,7 +1717,7 @@ class DockerStorageProbe:
         else:
             detail_msg = "Docker root directory was not reported by daemon"
 
-        return DockerStorageStatus(
+        res_status = DockerStorageStatus(
             engine_accessible=True,
             docker_root_dir=root_dir,
             storage_driver=driver,
@@ -1702,6 +1730,9 @@ class DockerStorageProbe:
             assessment_status=assessment,
             details=detail_msg
         )
+        if not bypass_cache:
+            cls._cache[context] = res_status
+        return res_status
 
 
 DEFAULT_HEADROOM_BYTES = 1024 * 1024 * 1024  # 1.0 GiB minimum free space buffer required after build
@@ -1891,15 +1922,24 @@ class AcceleratorPolicy:
     """Safe accelerator detection and package index policy."""
 
     _mock_status: AcceleratorStatus | None = None
+    _cached_status: AcceleratorStatus | None = None
 
     @classmethod
     def set_mock(cls, status: AcceleratorStatus | None) -> None:
         cls._mock_status = status
+        cls.clear_cache()
 
     @classmethod
-    def probe(cls, timeout: float = 2.0) -> AcceleratorStatus:
+    def clear_cache(cls) -> None:
+        cls._cached_status = None
+
+    @classmethod
+    def probe(cls, timeout: float = 2.0, bypass_cache: bool = False) -> AcceleratorStatus:
         if cls._mock_status is not None:
             return cls._mock_status
+
+        if not bypass_cache and cls._cached_status is not None:
+            return cls._cached_status
 
         smi = shutil.which("nvidia-smi")
         has_hardware = False
@@ -1937,7 +1977,7 @@ class AcceleratorPolicy:
         else:
             detail = "No NVIDIA GPU hardware detected; host is standard CPU"
 
-        return AcceleratorStatus(
+        res_status = AcceleratorStatus(
             has_gpu_hardware=has_hardware,
             has_docker_gpu_runtime=has_docker_runtime,
             gpu_usable_in_docker=gpu_usable,
@@ -1945,6 +1985,9 @@ class AcceleratorPolicy:
             gpu_name=gpu_name,
             details=detail
         )
+        if not bypass_cache:
+            cls._cached_status = res_status
+        return res_status
 
 
 # ---------- Workload planning ----------
@@ -5171,7 +5214,7 @@ class SmartPresenter:
             lines.append("-" * 80)
             lines.append("Recommendations:")
             for rec in profile.recommendations:
-                lines.append(f"  • {rec}")
+                lines.append(f"  * {rec}")
         lines.extend([
             "-" * 80,
             "Next Steps:",
@@ -5509,12 +5552,12 @@ class Console:
                     adapter.preflight()
                     if plan.resource_budget and plan.resource_budget.verdict == StorageVerdict.BLOCKED:
                         print("\n" + "=" * 80)
-                        print("DEPLOYMENT BLOCKED — INSUFFICIENT DOCKER STORAGE")
+                        print("DEPLOYMENT BLOCKED -- INSUFFICIENT DOCKER STORAGE")
                         print("=" * 80)
                         print(f"Estimated build requires at least {plan.resource_budget.min_gib:.1f} GiB.")
                         print(plan.resource_budget.explanations[0] if plan.resource_budget.explanations else "")
                         for rec in plan.resource_budget.recommendations:
-                            print(f"  • {rec}")
+                            print(f"  * {rec}")
                         print("=" * 80)
                         self.smart_stage = "result"
                         return
@@ -6370,7 +6413,7 @@ class Console:
             diag = SmartRecoveryCoordinator.diagnose(root)
             if diag:
                 for d in diag:
-                    print(f"  • {d}")
+                    print(f"  * {d}")
             else:
                 print("No recovery issues or stale locks detected.")
             print("-" * 80)
@@ -13447,7 +13490,7 @@ if __name__ == '__main__':
 
         def test_rc10_docker_storage_probe_cli_missing(self):
             with patch("shutil.which", return_value=None):
-                status = DockerStorageProbe.probe()
+                status = DockerStorageProbe.probe(bypass_cache=True)
                 self.assertFalse(status.engine_accessible)
                 self.assertEqual(status.assessment_status, "UNKNOWN")
                 self.assertIn("not found", status.details)
@@ -13458,7 +13501,7 @@ if __name__ == '__main__':
                 mock_run.return_value = subprocess.CompletedProcess(
                     args=[], returncode=0, stdout='"ssh://operator@remote-host:22"\n'
                 )
-                status = DockerStorageProbe.probe(context="remote-cluster")
+                status = DockerStorageProbe.probe(context="remote-cluster", bypass_cache=True)
                 self.assertTrue(status.is_remote_context)
                 self.assertEqual(status.assessment_status, "UNKNOWN")
                 self.assertIn("remote host", status.details)
@@ -13473,13 +13516,13 @@ if __name__ == '__main__':
                     subprocess.CompletedProcess(args=[], returncode=0, stdout=""),
                 ]
                 with patch("pathlib.Path.is_dir", return_value=False):
-                    status = DockerStorageProbe.probe()
+                    status = DockerStorageProbe.probe(bypass_cache=True)
                     self.assertTrue(status.is_vm_isolated)
                     self.assertEqual(status.assessment_status, "UNKNOWN")
 
         def test_rc10_resource_budget_estimator_ranges_and_verdicts(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                root = Path(tmpdir)
+                root = Path(tmpdir).resolve()
                 (root / "app.py").write_text("print('hello')\n")
 
                 # Ample space (50 GiB free): SUFFICIENT
@@ -13567,7 +13610,7 @@ def lazy_load():
 
         def test_rc10_ml_workload_preflight_prevents_disk_exhaustion(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 ml_script = """
 import numpy as np
 import pandas as pd
@@ -13622,7 +13665,7 @@ except ImportError:
 
         def test_rc10_smart_deploy_blocks_on_storage_deficit(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "app.py").write_text("print('test')\n")
                 con = Console(Settings(target_for(str(repo))))
                 con.ui_mode = "smart"
@@ -13651,11 +13694,21 @@ except ImportError:
                     con.feed_input("1")
                     self.assertEqual(con.pending.name, "smart_deploy")
 
-                    # Mock DockerAdapter to ensure build is never reached
+                    fake_host = DockerHostStatus(
+                        cli_installed=True,
+                        cli_path="/usr/bin/docker",
+                        compose_available=True,
+                        compose_version="2.24",
+                        engine_reachable=True,
+                        server_version="25.0",
+                    )
+                    # Mock DockerAdapter and DockerHostProbe to ensure build is never reached
                     with patch.object(DockerAdapter, "run") as mock_run, \
-                         patch.object(DockerAdapter, "preflight"):
+                         patch.object(DockerAdapter, "preflight"), \
+                         patch.object(DockerHostProbe, "probe", return_value=fake_host):
                         con.feed_input("YES")
                         mock_run.assert_not_called()
+                        self.assertEqual(con.smart_stage, "result")
                 finally:
                     DockerStorageProbe.set_mock(None)
 
@@ -13666,7 +13719,7 @@ except ImportError:
                     subprocess.CompletedProcess(args=[], returncode=0, stdout="NVIDIA RTX 4090\n"),
                     subprocess.CompletedProcess(args=[], returncode=0, stdout='["runc", "nvidia"]\n'),
                 ]
-                accel = AcceleratorPolicy.probe()
+                accel = AcceleratorPolicy.probe(bypass_cache=True)
                 self.assertTrue(accel.has_gpu_hardware)
                 self.assertTrue(accel.has_docker_gpu_runtime)
                 self.assertTrue(accel.gpu_usable_in_docker)
@@ -13674,9 +13727,9 @@ except ImportError:
 
         def test_rc10_cpu_wheel_index_rendering(self):
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = Path(tmpdir)
+                repo = Path(tmpdir).resolve()
                 (repo / "app.py").write_text("import torch\nprint(torch.__version__)\n")
-                target = Target(repo, pinned="app.py")
+                target = target_for(str(repo / "app.py"))
                 settings = Settings(target, dependency_mode="infer", gpu=False)
                 insp = Inspector().inspect(target)
                 plan = Planner().build(settings, insp)
