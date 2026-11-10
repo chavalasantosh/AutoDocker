@@ -2,9 +2,9 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-brightgreen.svg)](pyproject.toml)
-[![Release](https://img.shields.io/badge/Release-3.0.0--rc9-orange.svg)](RELEASE_NOTES.md)
+[![Release](https://img.shields.io/badge/Release-3.0.0--rc10-orange.svg)](RELEASE_NOTES.md)
 [![Dependencies](https://img.shields.io/badge/Dependencies-Zero%20(Stdlib%20Only)-success.svg)](requirements.txt)
-[![Tests](https://img.shields.io/badge/Tests-344%20Passed%20(100%25)-brightgreen.svg)](TEST_REPORT.md)
+[![Tests](https://img.shields.io/badge/Tests-354%20Passed%20(100%25)-brightgreen.svg)](TEST_REPORT.md)
 
 > **Autonomous, zero-dependency container infrastructure generator, resource cleaner, and deployment orchestrator in a single Python executable.**
 >
@@ -18,6 +18,11 @@
 
 - **Single Master Executable (`auto_docker.py`)**: Zero external pip packages needed at runtime — runs out of the box via `python auto_docker.py`.
 - **SMART Mode (`auto_docker.py smart`)**: One-command intelligent deployment combining project detection, dependency intelligence, preflight verification, deployment planning, and truthful runtime health checks with zero Docker jargon.
+- **Predictive Resource Budgeting (RC10)**:
+  - **Docker Daemon Storage Probing**: Non-destructive discovery of actual Docker root storage headroom without conflating the project filesystem with Docker disk.
+  - **Pre-Build Disk Exhaustion Prevention**: Calculates package download and extracted layer ranges (min/max) and classifies storage headroom (`SUFFICIENT`, `WARNING`, `BLOCKED`, `UNKNOWN`) before running `docker build`.
+  - **Guarded Optional Import Segregation**: AST analysis separates unconditional top-level imports from `try...except` and dynamic guards, preventing heavy ML accelerators (`catboost`, `lightgbm`, `xgboost`) from bloating minimal images unless explicitly required.
+  - **Safe CPU/GPU Accelerator Policy**: Distinguishes host GPU hardware from Docker daemon GPU runtime support; installs lightweight CPU wheels when Docker lacks NVIDIA runtime, saving 2.5+ GiB per build without unsafe index mixing.
 - **Auto-Pilot Quick-Start Wizard**: 3-step guided deployment (`Detect -> Configure -> Safe Deploy`) for zero-friction containerization.
 - **Dependency Intelligence 2.0**:
   - **Standard Library Immunity**: 300+ built-in modules (`json`, `sqlite3`, `pathlib`, `logging`, `dataclasses`, `asyncio`, etc.) are never misclassified as missing pip dependencies.

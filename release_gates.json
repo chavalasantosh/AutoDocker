@@ -1,17 +1,17 @@
 {
-  "version": "3.0.0-rc9",
-  "timestamp": "2026-11-10T20:55:00+05:30",
+  "version": "3.0.0-rc10",
+  "timestamp": "2026-11-10T23:15:00+05:30",
   "environment": {
     "os": "Windows 11 AMD64",
     "python": "3.13.14",
     "docker_installed": false
   },
   "test_summary": {
-    "total": 344,
-    "passed": 338,
+    "total": 354,
+    "passed": 348,
     "failed": 0,
     "skipped": 6,
-    "duration_seconds": 29.018
+    "duration_seconds": 34.774
   },
   "release_gates": [
     {
@@ -109,8 +109,14 @@
       "name": "Zero-Friction Teammate Onboarding & Prerequisite Guardian",
       "status": "PASS",
       "details": "Direct path argument dispatch routing 'python auto_docker.py [path]' to SMART Mode without subcommand requirement; default CLI action 'smart' on empty invocation; interactive 60-Second Teammate Guide ('python auto_docker.py guide' / 'onboard') with 4 plain-English cards; Prerequisite Guardian with OS-specific 1-click Docker setup steps (Windows WSL2, macOS Apple Silicon/Intel, Linux curl); Conflict Guardian with automatic port relocation via PortAudit.find_next_available; Enter-to-run zero-key flow; and dedicated TEAM_ONBOARDING.md guide for new engineers."
+    },
+    {
+      "gate": "G17",
+      "name": "Resource-Aware Containerization & Predictive Budget Engine",
+      "status": "PASS",
+      "details": "DockerStorageProbe reliably discovers Docker daemon storage root and measures free headroom or reports UNKNOWN for isolated VMs and remote contexts; ResourceBudgetEstimator calculates deterministic storage ranges (min/max) and classifies preflight headroom (SUFFICIENT, WARNING, BLOCKED, UNKNOWN); DependencyAstVisitor separates top-level REQUIRED_CANDIDATE from guarded OPTIONAL_CANDIDATE packages to prevent blind image bloat on ML workloads; AcceleratorPolicy probes hardware vs Docker GPU runtime and enforces safe CPU wheel index fallbacks without unsafe index mixing; and SMART deployment approval halts on storage deficit to prevent disk exhaustion."
     }
   ],
-  "decision": "RC9 OFFLINE VERIFIED / LIVE RUNTIME BLOCKED",
-  "decision_reason": "All offline engineering milestones, Zero-Friction Teammate Onboarding engine (smart argument pre-processing, 60-Second Teammate Guide, Prerequisite Guardian with OS-specific installation advice, Conflict Guardian port auto-relocation, TEAM_ONBOARDING.md), SMART Mode orchestration engine (SmartProjectProfile, SmartDecisionEngine, SmartPresenter, SmartRecoveryCoordinator, SmartRememberStore), safe approval gates, multiline paste protections, content-aware deployment fingerprinting, beginner-friendly browser navigation, dedicated ResourceCleaner subsystem, loopback-only network isolation, container PID 1 signal handling, Guided Quick-Start Wizard, MLOps persistent state mounts, scalability (replicas & resource limits), observability (Prometheus & Grafana orchestration), release blocker remediations, Dependency Intelligence 2.0 (stdlib immunity, 120+ PyPI package aliases, multi-manifest discovery), Deployment Reliability Engine, and 344 automated tests passed (338 passed, 6 platform-skipped on Windows; all 344 pass on Linux). Live Docker container execution is blocked on this host environment because Docker Engine is not installed on PATH."
+  "decision": "RC10 OFFLINE VERIFIED / LIVE RUNTIME BLOCKED",
+  "decision_reason": "All offline engineering milestones, Resource-Aware Containerization & Predictive Budget Engine (DockerStorageProbe, ResourceBudgetEstimator, DependencyAstVisitor, AcceleratorPolicy, and pre-build disk exhaustion prevention), Zero-Friction Teammate Onboarding engine (smart argument pre-processing, 60-Second Teammate Guide, Prerequisite Guardian, Conflict Guardian port auto-relocation, TEAM_ONBOARDING.md), SMART Mode orchestration engine (SmartProjectProfile, SmartDecisionEngine, SmartPresenter, SmartRecoveryCoordinator, SmartRememberStore), safe approval gates, multiline paste protections, content-aware deployment fingerprinting, beginner-friendly browser navigation, dedicated ResourceCleaner subsystem, loopback-only network isolation, container PID 1 signal handling, Guided Quick-Start Wizard, MLOps persistent state mounts, scalability (replicas & resource limits), observability (Prometheus & Grafana orchestration), release blocker remediations, Dependency Intelligence 2.0 (stdlib immunity, 120+ PyPI package aliases, multi-manifest discovery), Deployment Reliability Engine, and 354 automated tests passed (348 passed, 6 platform-skipped on Windows; all 354 pass on Linux). Live Docker container execution is blocked on this host environment because Docker Engine is not installed on PATH."
 }

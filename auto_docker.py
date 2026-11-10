@@ -46,7 +46,7 @@ import platform
 from enum import Enum
 from typing import Any, Iterator
 
-VERSION = "3.0.0-rc9"
+VERSION = "3.0.0-rc10"
 LOG = logging.getLogger("auto_docker")
 OUTPUT = ".opsforge"
 MAX_VISITED = 3000
@@ -130,6 +130,8 @@ class Candidate:
     framework: str
     app_object: bool
     needs_stdin: bool = False
+    required_imports: frozenset[str] = frozenset()
+    optional_imports: frozenset[str] = frozenset()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -191,6 +193,7 @@ class Plan:
     replicas: int = 1
     cpus: str | None = None
     memory: str | None = None
+    resource_budget: ResourceBudget | None = None
 
 
 # ---------- RC6 Typed Deployment Planning and Orchestration Models ----------
@@ -638,6 +641,58 @@ def _collect_python(root: Path) -> list[Path]:
     return found
 
 
+class DependencyAstVisitor(ast.NodeVisitor):
+    """Categorizes Python imports into required (top-level) and optional (guarded by try/except, conditionals, or functions)."""
+
+    def __init__(self) -> None:
+        self.required_imports: set[str] = set()
+        self.optional_imports: set[str] = set()
+        self._try_depth: int = 0
+        self._if_depth: int = 0
+        self._func_depth: int = 0
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._try_depth += 1
+        self.generic_visit(node)
+        self._try_depth -= 1
+
+    def visit_If(self, node: ast.If) -> None:
+        self._if_depth += 1
+        self.generic_visit(node)
+        self._if_depth -= 1
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._func_depth += 1
+        self.generic_visit(node)
+        self._func_depth -= 1
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._func_depth += 1
+        self.generic_visit(node)
+        self._func_depth -= 1
+
+    def _record(self, module_name: str) -> None:
+        if not module_name:
+            return
+        top = module_name.split(".")[0]
+        if not top or not top.isidentifier():
+            return
+        if self._try_depth > 0 or self._if_depth > 0 or self._func_depth > 0:
+            if top not in self.required_imports:
+                self.optional_imports.add(top)
+        else:
+            self.optional_imports.discard(top)
+            self.required_imports.add(top)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self._record(alias.name)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module:
+            self._record(node.module)
+
+
 def _check_source(path: Path, root: Path) -> Candidate:
     rel = path.relative_to(root).as_posix()
     if path.stat().st_size > MAX_PY_SIZE:
@@ -646,7 +701,9 @@ def _check_source(path: Path, root: Path) -> Candidate:
         tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=rel)
     except (SyntaxError, UnicodeError) as exc:
         raise OpsError(f"Cannot parse {rel}: {exc}") from exc
-    imports: set[str] = set()
+    visitor = DependencyAstVisitor()
+    visitor.visit(tree)
+    imports: set[str] = set(visitor.required_imports | visitor.optional_imports)
     main_guard = False
     app_object = False
     top_level_app = False
@@ -671,10 +728,6 @@ def _check_source(path: Path, root: Path) -> Candidate:
                     and isinstance(func.value, ast.Attribute) and func.value.attr == "stdin"
                     and isinstance(func.value.value, ast.Name) and func.value.value.id == "sys"):
                 needs_stdin = True
-        if isinstance(node, ast.Import):
-            imports.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.add(node.module.split(".")[0])
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             if any(isinstance(t, ast.Name) and t.id == "app" for t in targets):
@@ -703,7 +756,10 @@ def _check_source(path: Path, root: Path) -> Candidate:
     score += 10 if (app_object and top_level_app) else 0
     if name.startswith("_") or "util" in name or "config" in name:
         score -= 35
-    return Candidate(rel, score, frozenset(imports), main_guard, framework, top_level_app, needs_stdin)
+    return Candidate(
+        rel, score, frozenset(imports), main_guard, framework, top_level_app, needs_stdin,
+        frozenset(visitor.required_imports), frozenset(visitor.optional_imports)
+    )
 
 
 def _deps(root: Path) -> str | None:
@@ -917,6 +973,10 @@ class DependencyReport:
     declared: tuple[str, ...]
     possible_missing: tuple[str, ...]
     warnings: tuple[str, ...]
+    required_candidates: tuple[str, ...] = ()
+    optional_candidates: tuple[str, ...] = ()
+    unknown_candidates: tuple[str, ...] = ()
+    conflicts: tuple[str, ...] = ()
 
 
 class DependencyAudit:
@@ -1157,7 +1217,7 @@ class DependencyAudit:
         return names, []
 
     @staticmethod
-    def _reachable_imports(inspection: Inspection) -> tuple[set[str], list[str]]:
+    def _reachable_imports(inspection: Inspection) -> tuple[set[str], set[str], set[str], list[str]]:
         """BFS through directly reachable local .py modules, without importing them.
 
         Resolves static local imports only; dynamic imports, optional extras, and
@@ -1168,6 +1228,8 @@ class DependencyAudit:
         queue: deque[Path] = deque([first])
         seen: set[Path] = set()
         imports: set[str] = set()
+        req_imports: set[str] = set()
+        opt_imports: set[str] = set()
         warnings: list[str] = []
         MAX_REACHABLE = 64
 
@@ -1201,13 +1263,13 @@ class DependencyAudit:
             except (OSError, UnicodeError, SyntaxError) as exc:
                 warnings.append(f"Could not statically inspect local module {path.relative_to(root)}: {type(exc).__name__}")
                 continue
+            visitor = DependencyAstVisitor()
+            visitor.visit(tree)
             targets: list[Path] = []
+            for mod in (visitor.required_imports | visitor.optional_imports):
+                targets.extend(local_candidates(mod, (root, first.parent)))
             for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        imports.add(alias.name.split('.')[0])
-                        targets.extend(local_candidates(alias.name, (root, first.parent)))
-                elif isinstance(node, ast.ImportFrom):
+                if isinstance(node, ast.ImportFrom):
                     if node.level:
                         base = path.parent
                         for _ in range(node.level - 1):
@@ -1217,27 +1279,37 @@ class DependencyAudit:
                         search_roots = (root, first.parent)
                     module = node.module or ''
                     if module:
-                        if not node.level:
-                            imports.add(module.split('.')[0])
                         targets.extend(local_candidates(module, search_roots))
                     for alias in node.names:
-                        if alias.name == '*':
-                            continue
-                        targets.extend(local_candidates(f"{module}.{alias.name}".strip('.'), search_roots))
+                        if alias.name != '*':
+                            targets.extend(local_candidates(f"{module}.{alias.name}".strip('.'), search_roots))
+            req_imports.update(visitor.required_imports)
+            opt_imports.update(visitor.optional_imports)
+            imports.update(visitor.required_imports | visitor.optional_imports)
             # A local module that also shares a name with a third-party package
             # is ambiguous: retain the warning rather than claiming certainty.
             for candidate in sorted(set(targets)):
                 if candidate.is_file() and not candidate.is_symlink():
                     queue.append(candidate)
-        return imports, warnings
+        return imports, req_imports, opt_imports, warnings
 
     def report(self, inspection: Inspection) -> DependencyReport:
-        imports, reach_warnings = self._reachable_imports(inspection)
-        # Exclude standard library modules from observed imports (standard library immunity)
+        imports, reach_req, reach_opt, reach_warnings = self._reachable_imports(inspection)
+        entry_req = getattr(inspection.entry, "required_imports", frozenset())
+        entry_opt = getattr(inspection.entry, "optional_imports", frozenset())
+
+        raw_req = set((entry_req | reach_req) - STDLIB_MODULES)
+        raw_opt = set((entry_opt | reach_opt) - STDLIB_MODULES) - raw_req
+
         all_raw_imports = (inspection.entry.imports | imports) - STDLIB_MODULES
         observed = {IMPORT_PACKAGES[m] for m in all_raw_imports if m in IMPORT_PACKAGES}
         if inspection.entry.framework == "fastapi":
             observed.add("uvicorn")  # Required by generated launch command.
+            raw_req.add("uvicorn")
+
+        req_candidates = {IMPORT_PACKAGES[m] for m in raw_req if m in IMPORT_PACKAGES}
+        opt_candidates = {IMPORT_PACKAGES[m] for m in raw_opt if m in IMPORT_PACKAGES} - req_candidates
+        unknown_candidates = {m for m in all_raw_imports if m not in IMPORT_PACKAGES}
         warnings: list[str] = list(reach_warnings)
         declared: set[str] = set()
 
@@ -1289,15 +1361,29 @@ class DependencyAudit:
         missing = sorted(name for name in observed if _distribution_key(name) not in declared)
         if missing and dep:
             warnings.append("Possibly undeclared imports (may be provided through extras or transitively): " + ", ".join(missing))
-        return DependencyReport(tuple(sorted(observed)), tuple(sorted(declared)), tuple(missing), tuple(warnings))
+        return DependencyReport(
+            observed=tuple(sorted(observed)),
+            declared=tuple(sorted(declared)),
+            possible_missing=tuple(missing),
+            warnings=tuple(warnings),
+            required_candidates=tuple(sorted(req_candidates)),
+            optional_candidates=tuple(sorted(opt_candidates)),
+            unknown_candidates=tuple(sorted(unknown_candidates)),
+            conflicts=(),
+        )
 
     @staticmethod
     def print_report(report: DependencyReport) -> None:
         print("\nAuto Docker dependency preflight (static, read-only)")
-        print("  Known third-party packages: " + (", ".join(report.observed) or "(none identified)"))
         print("  Explicitly declared packages: " + (", ".join(report.declared) or "(none found)"))
+        print("  Required candidate packages: " + (", ".join(report.required_candidates) or "(none identified)"))
+        if report.optional_candidates:
+            print("  Optional candidate packages (guarded): " + ", ".join(report.optional_candidates))
+        if report.unknown_candidates:
+            print("  Unknown imports (unrecognized): " + ", ".join(report.unknown_candidates))
         for warning in report.warnings:
             print("  WARNING: " + warning)
+        print("  Imports are inspected without executing your app. Review the project's dependency manifest before building.")
         print("  Imports are inspected without executing your app. Review the project's dependency manifest before building.")
 
 
@@ -1381,6 +1467,486 @@ class Inspector:
         return Inspection(root, chosen, dependency, mode, ranked[:8], len(paths), tuple(warnings))
 
 
+# ---------- Auto Docker RC10 — Predictive Resource Budgeting & Accelerator Policies ----------
+
+class StorageVerdict(str, Enum):
+    SUFFICIENT = "SUFFICIENT"
+    WARNING = "WARNING"
+    BLOCKED = "BLOCKED"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclasses.dataclass(frozen=True)
+class DockerStorageStatus:
+    engine_accessible: bool
+    docker_root_dir: str | None
+    storage_driver: str | None
+    daemon_free_bytes: int | None
+    daemon_total_bytes: int | None
+    reclaimable_build_cache_bytes: int
+    reclaimable_images_bytes: int
+    is_remote_context: bool
+    is_vm_isolated: bool
+    assessment_status: str  # "CONFIRMED", "INFERRED", "UNKNOWN"
+    details: str
+
+    @property
+    def free_gib(self) -> float | None:
+        return self.daemon_free_bytes / (1024**3) if self.daemon_free_bytes is not None else None
+
+    @property
+    def total_gib(self) -> float | None:
+        return self.daemon_total_bytes / (1024**3) if self.daemon_total_bytes is not None else None
+
+    @property
+    def reclaimable_gib(self) -> float:
+        return (self.reclaimable_build_cache_bytes + self.reclaimable_images_bytes) / (1024**3)
+
+
+class DockerStorageProbe:
+    """Non-destructive, read-only Docker Engine storage probe.
+
+    Inspects Docker daemon root directory and available storage space without
+    conflating the project filesystem with Docker Engine storage.
+    """
+
+    _mock_storage_status: DockerStorageStatus | None = None
+
+    @classmethod
+    def set_mock(cls, status: DockerStorageStatus | None) -> None:
+        cls._mock_storage_status = status
+
+    @classmethod
+    def _parse_df_size(cls, raw: str) -> int:
+        if not raw:
+            return 0
+        raw = raw.strip()
+        m = re.match(r"^([\d.]+)\s*([a-zA-Z]+)", raw)
+        if not m:
+            return 0
+        val = float(m.group(1))
+        unit = m.group(2).upper()
+        multipliers = {
+            "B": 1,
+            "KB": 1024, "KIB": 1024, "K": 1024,
+            "MB": 1024**2, "MIB": 1024**2, "M": 1024**2,
+            "GB": 1024**3, "GIB": 1024**3, "G": 1024**3,
+            "TB": 1024**4, "TIB": 1024**4, "T": 1024**4,
+        }
+        return int(val * multipliers.get(unit, 1))
+
+    @classmethod
+    def probe(cls, context: str | None = None, timeout: float = 2.0) -> DockerStorageStatus:
+        if cls._mock_storage_status is not None:
+            return cls._mock_storage_status
+
+        docker_cli = shutil.which("docker")
+        if not docker_cli:
+            return DockerStorageStatus(
+                engine_accessible=False,
+                docker_root_dir=None,
+                storage_driver=None,
+                daemon_free_bytes=None,
+                daemon_total_bytes=None,
+                reclaimable_build_cache_bytes=0,
+                reclaimable_images_bytes=0,
+                is_remote_context=False,
+                is_vm_isolated=False,
+                assessment_status="UNKNOWN",
+                details="Docker CLI not found on host PATH"
+            )
+
+        prefix = [docker_cli]
+        if context:
+            prefix.extend(["--context", context])
+
+        # Check if context is remote
+        is_remote = False
+        if context:
+            try:
+                res = subprocess.run([docker_cli, "context", "inspect", context, "--format", "{{json .Endpoints.docker.Host}}"],
+                                     capture_output=True, text=True, timeout=timeout, check=False)
+                if res.returncode == 0:
+                    host_str = res.stdout.strip().strip('"\'').lower()
+                    if host_str.startswith(("tcp://", "ssh://", "http://", "https://")):
+                        is_remote = True
+            except Exception:
+                pass
+
+        if is_remote:
+            return DockerStorageStatus(
+                engine_accessible=True,
+                docker_root_dir=None,
+                storage_driver=None,
+                daemon_free_bytes=None,
+                daemon_total_bytes=None,
+                reclaimable_build_cache_bytes=0,
+                reclaimable_images_bytes=0,
+                is_remote_context=True,
+                is_vm_isolated=False,
+                assessment_status="UNKNOWN",
+                details=f"Remote Docker context '{context}'; storage metrics reside on remote host"
+            )
+
+        # Probe Docker Info
+        try:
+            res = subprocess.run([*prefix, "info", "--format", "{{.DockerRootDir}}|{{.Driver}}"],
+                                 capture_output=True, text=True, timeout=timeout, check=False)
+            if res.returncode != 0:
+                err = (res.stderr or res.stdout or "").strip().splitlines()
+                detail = err[-1][:120] if err else "Docker daemon unreachable"
+                return DockerStorageStatus(
+                    engine_accessible=False,
+                    docker_root_dir=None,
+                    storage_driver=None,
+                    daemon_free_bytes=None,
+                    daemon_total_bytes=None,
+                    reclaimable_build_cache_bytes=0,
+                    reclaimable_images_bytes=0,
+                    is_remote_context=False,
+                    is_vm_isolated=False,
+                    assessment_status="UNKNOWN",
+                    details=f"Docker daemon unreachable ({detail})"
+                )
+            parts = res.stdout.strip().split("|")
+            root_dir = parts[0].strip() if len(parts) > 0 else None
+            driver = parts[1].strip() if len(parts) > 1 else None
+        except Exception as exc:
+            return DockerStorageStatus(
+                engine_accessible=False,
+                docker_root_dir=None,
+                storage_driver=None,
+                daemon_free_bytes=None,
+                daemon_total_bytes=None,
+                reclaimable_build_cache_bytes=0,
+                reclaimable_images_bytes=0,
+                is_remote_context=False,
+                is_vm_isolated=False,
+                assessment_status="UNKNOWN",
+                details=f"Failed to query Docker daemon info: {exc}"
+            )
+
+        # Inspect reclaimable space via docker system df
+        reclaimable_cache = 0
+        reclaimable_images = 0
+        try:
+            df_res = subprocess.run([*prefix, "system", "df", "--format", "{{json .}}"],
+                                    capture_output=True, text=True, timeout=timeout, check=False)
+            if df_res.returncode == 0 and df_res.stdout:
+                for line in df_res.stdout.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                        t = str(row.get("Type", "")).lower()
+                        rec_str = str(row.get("Reclaimable", "0B"))
+                        rec_clean = rec_str.split("(")[0].strip()
+                        rec_bytes = cls._parse_df_size(rec_clean)
+                        if "build cache" in t:
+                            reclaimable_cache += rec_bytes
+                        elif "images" in t:
+                            reclaimable_images += rec_bytes
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # Inspect actual disk space of Docker root directory
+        free_bytes: int | None = None
+        total_bytes: int | None = None
+        is_vm = False
+        assessment = "UNKNOWN"
+        detail_msg = ""
+
+        if root_dir:
+            try:
+                p = Path(root_dir)
+                check_path = None
+                if p.is_dir():
+                    check_path = p
+                else:
+                    parent = p.parent
+                    while parent != parent.parent:
+                        if parent.is_dir():
+                            check_path = parent
+                            break
+                        parent = parent.parent
+                    if check_path is None and Path("/").is_dir():
+                        check_path = Path("/")
+
+                if check_path is not None:
+                    usage = shutil.disk_usage(check_path)
+                    free_bytes = usage.free
+                    total_bytes = usage.total
+                    assessment = "CONFIRMED"
+                    detail_msg = f"{free_bytes / (1024**3):.1f} GiB free on Docker storage ({root_dir})"
+                else:
+                    is_vm = True
+                    detail_msg = f"Docker daemon storage root ({root_dir}) is isolated inside VM/WSL2; cannot query free space from host"
+            except (PermissionError, OSError) as exc:
+                detail_msg = f"Cannot query Docker root directory ({root_dir}): {exc}"
+        else:
+            detail_msg = "Docker root directory was not reported by daemon"
+
+        return DockerStorageStatus(
+            engine_accessible=True,
+            docker_root_dir=root_dir,
+            storage_driver=driver,
+            daemon_free_bytes=free_bytes,
+            daemon_total_bytes=total_bytes,
+            reclaimable_build_cache_bytes=reclaimable_cache,
+            reclaimable_images_bytes=reclaimable_images,
+            is_remote_context=False,
+            is_vm_isolated=is_vm,
+            assessment_status=assessment,
+            details=detail_msg
+        )
+
+
+DEFAULT_HEADROOM_BYTES = 1024 * 1024 * 1024  # 1.0 GiB minimum free space buffer required after build
+
+PACKAGE_FOOTPRINT_ESTIMATES: dict[str, tuple[int, int, bool]] = {
+    # Heavy Deep Learning & Scientific ML
+    "torch": (850 * 1024 * 1024, 2500 * 1024 * 1024, True),
+    "torchvision": (150 * 1024 * 1024, 400 * 1024 * 1024, True),
+    "torchaudio": (50 * 1024 * 1024, 150 * 1024 * 1024, True),
+    "tensorflow": (500 * 1024 * 1024, 1800 * 1024 * 1024, True),
+    "catboost": (75 * 1024 * 1024, 300 * 1024 * 1024, True),
+    "lightgbm": (45 * 1024 * 1024, 160 * 1024 * 1024, True),
+    "xgboost": (85 * 1024 * 1024, 280 * 1024 * 1024, True),
+    "scipy": (40 * 1024 * 1024, 160 * 1024 * 1024, True),
+    "scikit-learn": (30 * 1024 * 1024, 120 * 1024 * 1024, True),
+    "sklearn": (30 * 1024 * 1024, 120 * 1024 * 1024, True),
+    "mlflow": (60 * 1024 * 1024, 220 * 1024 * 1024, True),
+    "transformers": (150 * 1024 * 1024, 500 * 1024 * 1024, True),
+    "vllm": (500 * 1024 * 1024, 1600 * 1024 * 1024, True),
+    "opencv-python": (70 * 1024 * 1024, 240 * 1024 * 1024, True),
+    "statsmodels": (35 * 1024 * 1024, 140 * 1024 * 1024, True),
+    "spacy": (60 * 1024 * 1024, 200 * 1024 * 1024, True),
+    # Moderate packages
+    "pandas": (35 * 1024 * 1024, 120 * 1024 * 1024, False),
+    "polars": (35 * 1024 * 1024, 110 * 1024 * 1024, False),
+    "matplotlib": (30 * 1024 * 1024, 100 * 1024 * 1024, False),
+    "numpy": (20 * 1024 * 1024, 70 * 1024 * 1024, False),
+    "fastapi": (10 * 1024 * 1024, 30 * 1024 * 1024, False),
+    "uvicorn": (10 * 1024 * 1024, 30 * 1024 * 1024, False),
+    "flask": (8 * 1024 * 1024, 25 * 1024 * 1024, False),
+    "streamlit": (30 * 1024 * 1024, 90 * 1024 * 1024, False),
+    "gradio": (40 * 1024 * 1024, 120 * 1024 * 1024, False),
+}
+
+DEFAULT_PACKAGE_FOOTPRINT = (15 * 1024 * 1024, 50 * 1024 * 1024, False)
+
+
+@dataclasses.dataclass(frozen=True)
+class ResourceBudget:
+    base_image: str
+    base_image_bytes_est: int
+    packages_bytes_min: int
+    packages_bytes_max: int
+    build_headroom_bytes: int
+    context_bytes: int
+    total_bytes_min: int
+    total_bytes_max: int
+    confidence: str  # "HIGH", "MEDIUM", "LOW"
+    verdict: StorageVerdict
+    heavy_packages: tuple[str, ...]
+    optional_candidates: tuple[str, ...]
+    explanations: tuple[str, ...]
+    recommendations: tuple[str, ...]
+
+    @property
+    def min_gib(self) -> float:
+        return self.total_bytes_min / (1024**3)
+
+    @property
+    def max_gib(self) -> float:
+        return self.total_bytes_max / (1024**3)
+
+
+class ResourceBudgetEstimator:
+    """Calculates storage ranges and assesses Docker host build headroom."""
+
+    @classmethod
+    def _estimate_context_bytes(cls, root: Path, max_files: int = 1000) -> int:
+        total = 0
+        count = 0
+        ignore_dirs = {".git", ".opsforge", "__pycache__", ".venv", "venv", ".idea", ".vscode", "node_modules", ".cache"}
+        try:
+            for p in root.rglob("*"):
+                if count >= max_files:
+                    break
+                if any(part in ignore_dirs for part in p.parts):
+                    continue
+                try:
+                    if p.is_file() and not p.is_symlink():
+                        total += p.stat().st_size
+                        count += 1
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        return min(total, 500 * 1024 * 1024)
+
+    @classmethod
+    def estimate(
+        cls,
+        base_image: str,
+        packages: tuple[str, ...] | list[str] | set[str],
+        root: Path,
+        storage_status: DockerStorageStatus,
+        optional_packages: tuple[str, ...] | list[str] | set[str] = (),
+        headroom_bytes: int = DEFAULT_HEADROOM_BYTES
+    ) -> ResourceBudget:
+        img_lower = base_image.lower()
+        if "slim" in img_lower:
+            base_bytes = 160 * 1024 * 1024
+        elif "alpine" in img_lower:
+            base_bytes = 60 * 1024 * 1024
+        elif "cuda" in img_lower:
+            base_bytes = 3500 * 1024 * 1024
+        else:
+            base_bytes = 950 * 1024 * 1024
+
+        heavy_pkgs: list[str] = []
+        dl_sum = 0
+        ext_sum = 0
+        all_pkgs = set(packages) | set(optional_packages)
+        for pkg in sorted(all_pkgs):
+            key = _distribution_key(pkg)
+            dl, ext, is_heavy = PACKAGE_FOOTPRINT_ESTIMATES.get(key, DEFAULT_PACKAGE_FOOTPRINT)
+            dl_sum += dl
+            ext_sum += ext
+            if is_heavy:
+                heavy_pkgs.append(pkg)
+
+        context_bytes = cls._estimate_context_bytes(root)
+        min_bytes = base_bytes + ext_sum + context_bytes
+        max_bytes = base_bytes + int((dl_sum + ext_sum) * 1.35) + context_bytes + (250 * 1024 * 1024)
+
+        explanations: list[str] = []
+        recs: list[str] = []
+
+        if heavy_pkgs:
+            explanations.append(f"Heavy ML/computation packages detected: {', '.join(sorted(set(heavy_pkgs)))}")
+        if optional_packages:
+            explanations.append(f"Optional candidates in guarded blocks: {', '.join(sorted(set(optional_packages)))}")
+
+        free = storage_status.daemon_free_bytes
+        confidence = "HIGH"
+        if free is None:
+            verdict = StorageVerdict.UNKNOWN
+            confidence = "LOW" if storage_status.is_vm_isolated or storage_status.is_remote_context else "MEDIUM"
+            explanations.append(f"Docker storage capacity could not be queried directly ({storage_status.details})")
+            recs.append(f"Ensure at least {max_bytes / (1024**3):.1f} GiB free space on your Docker storage before building.")
+        elif free < min_bytes:
+            verdict = StorageVerdict.BLOCKED
+            confidence = "HIGH"
+            explanations.append(f"Storage BLOCKED: Estimated build requires at least {min_bytes / (1024**3):.1f} GiB, but only {free / (1024**3):.1f} GiB free on Docker storage.")
+            recs.append(f"Free up at least {(min_bytes + headroom_bytes - free) / (1024**3):.1f} GiB before building container images.")
+            if storage_status.reclaimable_gib > 0.5:
+                recs.append(f"Run 'docker builder prune' to reclaim {storage_status.reclaimable_gib:.1f} GiB from Docker build cache.")
+        elif free < max_bytes + headroom_bytes:
+            verdict = StorageVerdict.WARNING
+            confidence = "HIGH"
+            explanations.append(f"Storage WARNING: Estimated build needs {min_bytes / (1024**3):.1f} - {max_bytes / (1024**3):.1f} GiB. Headroom is tight ({free / (1024**3):.1f} GiB free, < 1.0 GiB safety buffer).")
+            recs.append("Build might exhaust disk if layers are not cached. Review heavy packages or free up space.")
+            if storage_status.reclaimable_gib > 0.5:
+                recs.append(f"Run 'docker builder prune' to reclaim {storage_status.reclaimable_gib:.1f} GiB from Docker build cache.")
+        else:
+            verdict = StorageVerdict.SUFFICIENT
+            confidence = "HIGH"
+            explanations.append(f"Storage headroom confirmed: {free / (1024**3):.1f} GiB available on Docker storage (estimated need: {min_bytes / (1024**3):.1f} - {max_bytes / (1024**3):.1f} GiB).")
+
+        return ResourceBudget(
+            base_image=base_image,
+            base_image_bytes_est=base_bytes,
+            packages_bytes_min=min_bytes,
+            packages_bytes_max=max_bytes,
+            build_headroom_bytes=headroom_bytes,
+            context_bytes=context_bytes,
+            total_bytes_min=min_bytes,
+            total_bytes_max=max_bytes,
+            confidence=confidence,
+            verdict=verdict,
+            heavy_packages=tuple(sorted(set(heavy_pkgs))),
+            optional_candidates=tuple(sorted(set(optional_packages))),
+            explanations=tuple(explanations),
+            recommendations=tuple(recs)
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class AcceleratorStatus:
+    has_gpu_hardware: bool
+    has_docker_gpu_runtime: bool
+    gpu_usable_in_docker: bool
+    gpu_count: int
+    gpu_name: str | None
+    details: str
+
+
+class AcceleratorPolicy:
+    """Safe accelerator detection and package index policy."""
+
+    _mock_status: AcceleratorStatus | None = None
+
+    @classmethod
+    def set_mock(cls, status: AcceleratorStatus | None) -> None:
+        cls._mock_status = status
+
+    @classmethod
+    def probe(cls, timeout: float = 2.0) -> AcceleratorStatus:
+        if cls._mock_status is not None:
+            return cls._mock_status
+
+        smi = shutil.which("nvidia-smi")
+        has_hardware = False
+        gpu_name = None
+        gpu_count = 0
+        if smi:
+            try:
+                res = subprocess.run([smi, "--query-gpu=name", "--format=csv,noheader"],
+                                     capture_output=True, text=True, timeout=timeout, check=False)
+                if res.returncode == 0 and res.stdout.strip():
+                    lines = [line.strip() for line in res.stdout.strip().splitlines() if line.strip()]
+                    if lines:
+                        has_hardware = True
+                        gpu_name = lines[0]
+                        gpu_count = len(lines)
+            except Exception:
+                pass
+
+        has_docker_runtime = False
+        docker_cli = shutil.which("docker")
+        if docker_cli:
+            try:
+                res = subprocess.run([docker_cli, "info", "--format", "{{json .Runtimes}}"],
+                                     capture_output=True, text=True, timeout=timeout, check=False)
+                if res.returncode == 0 and res.stdout and "nvidia" in res.stdout.lower():
+                    has_docker_runtime = True
+            except Exception:
+                pass
+
+        gpu_usable = has_hardware and has_docker_runtime
+        if gpu_usable:
+            detail = f"NVIDIA GPU available ({gpu_name}) with active Docker NVIDIA container runtime"
+        elif has_hardware:
+            detail = f"NVIDIA GPU detected on host ({gpu_name}), but Docker lacks 'nvidia' container runtime (runs on CPU)"
+        else:
+            detail = "No NVIDIA GPU hardware detected; host is standard CPU"
+
+        return AcceleratorStatus(
+            has_gpu_hardware=has_hardware,
+            has_docker_gpu_runtime=has_docker_runtime,
+            gpu_usable_in_docker=gpu_usable,
+            gpu_count=gpu_count,
+            gpu_name=gpu_name,
+            details=detail
+        )
+
+
 # ---------- Workload planning ----------
 
 class Planner:
@@ -1459,12 +2025,13 @@ class Planner:
         if settings.dependency_mode not in ("strict", "infer"):
             raise OpsError("Dependency policy must be 'strict' or 'infer'.")
         inferred_packages: tuple[str, ...] = ()
+        audit = DependencyAudit().report(inspection)
         if settings.dependency_mode == "infer":
             if inspection.dependency is not None:
                 raise OpsError("'deps infer' works only without a dependency manifest. "
                                "Edit requirements.txt / pyproject.toml instead, or select 'deps strict'.")
-            audit = DependencyAudit().report(inspection)
-            inferred_packages = audit.possible_missing
+            to_infer = audit.required_candidates if audit.required_candidates else audit.possible_missing
+            inferred_packages = tuple(sorted(set(to_infer) - set(audit.declared)))
             if not inferred_packages:
                 warnings.append("No known third-party distributions were inferred. This does NOT prove dependencies are complete.")
             else:
@@ -1472,6 +2039,24 @@ class Planner:
                                 + ", ".join(inferred_packages)
                                 + ". Resolve and pin reviewed versions for reproducible builds.")
                 warnings.append("Static imports cannot prove which dependencies, versions, or system libraries your app needs.")
+            if audit.optional_candidates:
+                warnings.append("Optional candidate packages in guarded blocks omitted from infer by default: "
+                                + ", ".join(audit.optional_candidates)
+                                + ". Add to requirements.txt if needed.")
+
+        storage_status = DockerStorageProbe.probe(context=settings.docker_context)
+        pkg_list = audit.declared or inferred_packages or audit.possible_missing
+        resource_budget = ResourceBudgetEstimator.estimate(
+            base_image=image,
+            packages=pkg_list,
+            root=inspection.root,
+            storage_status=storage_status,
+            optional_packages=audit.optional_candidates
+        )
+        if resource_budget.verdict == StorageVerdict.BLOCKED:
+            warnings.append(f"PREFLIGHT BLOCKED: {resource_budget.explanations[0]}")
+        elif resource_budget.verdict == StorageVerdict.WARNING:
+            warnings.append(f"PREFLIGHT WARNING: {resource_budget.explanations[0]}")
         if settings.services_override is not None:
             warnings.append("Optional services manually selected; workload profile does not add other services.")
         if f == "gradio":
@@ -1522,7 +2107,7 @@ class Planner:
         if not persistent_dirs:
             auto_dirs = [d for d in ("artifacts", "models", "runs", "checkpoints", "data", "datasets", "registry", "storage", "uploads", "outputs", "output", "logs", "weights", "db", "database") if (inspection.root / d).is_dir()]
             persistent_dirs = tuple(auto_dirs)
-        return Plan(inspection, mode, port, settings.gpu, command, services, tuple(warnings), tuple(ports), inferred_packages, kind, path, image, tuple(sorted(settings.service_images)), persistent_dirs=persistent_dirs, replicas=settings.replicas, cpus=settings.cpus, memory=settings.memory)
+        return Plan(inspection, mode, port, settings.gpu, command, services, tuple(warnings), tuple(ports), inferred_packages, kind, path, image, tuple(sorted(settings.service_images)), persistent_dirs=persistent_dirs, replicas=settings.replicas, cpus=settings.cpus, memory=settings.memory, resource_budget=resource_budget)
 
 
 # ---------- Deterministic YAML and Dockerfile generation ----------
@@ -1600,9 +2185,16 @@ class Renderer:
             # The names are from a fixed import-to-distribution allowlist, never shell input.
             if not all(re.fullmatch(r"[a-zA-Z0-9_.-]+", pkg) for pkg in plan.inferred_packages):
                 raise OpsError("Unsafe inferred dependency name.")
-            setup = ("# Explicitly approved, unpinned inferred packages; use a real manifest for production.\n"
-                     "RUN /opt/venv/bin/python -m pip install --no-cache-dir "
-                     + " ".join(plan.inferred_packages))
+            torch_pkgs = [p for p in plan.inferred_packages if p in ("torch", "torchvision", "torchaudio")]
+            other_pkgs = [p for p in plan.inferred_packages if p not in ("torch", "torchvision", "torchaudio")]
+            commands = ["# Explicitly approved, unpinned inferred packages; use a real manifest for production."]
+            if torch_pkgs and not plan.gpu:
+                commands.append("RUN /opt/venv/bin/python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu " + " ".join(torch_pkgs))
+            elif torch_pkgs:
+                commands.append("RUN /opt/venv/bin/python -m pip install --no-cache-dir " + " ".join(torch_pkgs))
+            if other_pkgs:
+                commands.append("RUN /opt/venv/bin/python -m pip install --no-cache-dir " + " ".join(other_pkgs))
+            setup = "\n".join(commands)
         else:
             setup = "# No dependency manifest detected; no external Python packages installed."
         expose = f"EXPOSE {plan.port}\n" if plan.port else ""
@@ -3457,6 +4049,22 @@ class EnvironmentDoctor:
                 ok, detail = self._probe([docker, "--context", docker_context,
                                           "info", "--format", "{{.ServerVersion}}"])
                 rows.append(("Selected context", ok, f"{docker_context}: {detail}"))
+        storage = DockerStorageProbe.probe(docker_context)
+        if storage.engine_accessible and storage.daemon_free_bytes is not None:
+            rows.append(("Docker storage", storage.daemon_free_bytes >= 5 * 1024**3, f"{storage.free_gib:.1f} GiB free ({storage.docker_root_dir})"))
+        elif storage.is_vm_isolated:
+            rows.append(("Docker storage", True, "Isolated in VM/WSL2 (unmeasured from host)"))
+        elif storage.is_remote_context:
+            rows.append(("Docker storage", True, f"Remote context ({docker_context})"))
+        elif docker is not None:
+            rows.append(("Docker storage", False, storage.details))
+        if storage.reclaimable_gib > 0.1:
+            rows.append(("Reclaimable space", True, f"{storage.reclaimable_gib:.1f} GiB (run 'docker builder prune')"))
+        accel = AcceleratorPolicy.probe()
+        if accel.has_gpu_hardware or accel.has_docker_gpu_runtime:
+            rows.append(("Accelerator", accel.gpu_usable_in_docker, accel.details))
+        else:
+            rows.append(("Accelerator", True, accel.details))
         if sandbox:
             rows.extend(self._host_report())
         return rows
@@ -4110,6 +4718,12 @@ class SmartProjectProfile:
     is_ready: bool
     recommendations: tuple[str, ...]
     existing_stack: bool = False
+    resource_budget: ResourceBudget | None = None
+    storage_status: DockerStorageStatus | None = None
+    accelerator_status: AcceleratorStatus | None = None
+    declared_dependencies: tuple[str, ...] = ()
+    required_candidates: tuple[str, ...] = ()
+    optional_candidates: tuple[str, ...] = ()
 
 
 class SmartRememberStore:
@@ -4284,7 +4898,47 @@ class SmartDecisionEngine:
                     ports_list.append((mapping.service, mapping.host, mapping.container))
                     confidence_findings.append(("Application Port", "CONFIRMED", f"Port {mapping.host} -> {mapping.container} ({mapping.service}) available"))
 
-        is_ready = len(unresolved) == 0 and not any(f[1] == "BLOCKED" for f in confidence_findings if f[0] == "Dependencies")
+        # Storage & Budget preflight
+        storage_status = DockerStorageProbe.probe(context=settings.docker_context if settings else None)
+        budget = plan.resource_budget or ResourceBudgetEstimator.estimate(
+            plan.python_image,
+            dep_report.declared or plan.inferred_packages or dep_report.possible_missing,
+            resolved_root,
+            storage_status,
+            optional_packages=dep_report.optional_candidates
+        )
+
+        if storage_status.assessment_status == "CONFIRMED" and storage_status.daemon_free_bytes is not None:
+            tag = "CONFIRMED" if budget.verdict == StorageVerdict.SUFFICIENT else ("WARNING" if budget.verdict == StorageVerdict.WARNING else "BLOCKED")
+            confidence_findings.append(("Docker Storage", tag, f"{storage_status.free_gib:.1f} GiB free on Docker disk (Estimated build: {budget.min_gib:.1f} - {budget.max_gib:.1f} GiB)"))
+        elif storage_status.is_remote_context:
+            confidence_findings.append(("Docker Storage", "UNKNOWN", f"Remote Docker context ({settings.docker_context if settings else 'remote'}); host disk unmeasured (Estimated build: {budget.min_gib:.1f} - {budget.max_gib:.1f} GiB)"))
+        elif storage_status.is_vm_isolated:
+            confidence_findings.append(("Docker Storage", "UNKNOWN", f"Docker Desktop VM-isolated storage; host disk unmeasured directly (Estimated build: {budget.min_gib:.1f} - {budget.max_gib:.1f} GiB)"))
+        else:
+            confidence_findings.append(("Docker Storage", "UNKNOWN", f"{storage_status.details} (Estimated build: {budget.min_gib:.1f} - {budget.max_gib:.1f} GiB)"))
+
+        # Accelerator
+        accel = AcceleratorPolicy.probe()
+        if accel.gpu_usable_in_docker:
+            confidence_findings.append(("Accelerator", "CONFIRMED", f"NVIDIA GPU ready ({accel.gpu_name})"))
+        elif accel.has_gpu_hardware:
+            confidence_findings.append(("Accelerator", "INFERRED", "GPU on host, but Docker lacks nvidia runtime (CPU mode used)"))
+        else:
+            confidence_findings.append(("Accelerator", "CONFIRMED", "Standard CPU runtime"))
+
+        if dep_report.optional_candidates:
+            confidence_findings.append(("Optional Imports", "INFERRED", f"Guarded optional packages: {', '.join(dep_report.optional_candidates[:4])} (omitted by default)"))
+
+        if budget.verdict == StorageVerdict.BLOCKED:
+            risk_findings.append(f"Storage deficit: build needs estimated {budget.min_gib:.1f} GiB, but Docker storage has only {storage_status.free_gib or 0:.1f} GiB free")
+            recommendations.append("Free up disk space on Docker storage before building to prevent failure.")
+            if storage_status.reclaimable_gib > 0.5:
+                recommendations.append(f"Run 'docker builder prune' to reclaim {storage_status.reclaimable_gib:.1f} GiB from Docker build cache.")
+        elif budget.verdict == StorageVerdict.WARNING:
+            risk_findings.append(f"Storage headroom tight: build needs {budget.min_gib:.1f}-{budget.max_gib:.1f} GiB (< 1.0 GiB safety buffer)")
+
+        is_ready = len(unresolved) == 0 and not any(f[1] == "BLOCKED" for f in confidence_findings if f[0] in ("Dependencies", "Docker Storage"))
 
         profile = SmartProjectProfile(
             project_root=resolved_root,
@@ -4305,6 +4959,12 @@ class SmartDecisionEngine:
             is_ready=is_ready,
             recommendations=tuple(recommendations),
             existing_stack=False,
+            resource_budget=budget,
+            storage_status=storage_status,
+            accelerator_status=accel,
+            declared_dependencies=dep_report.declared,
+            required_candidates=dep_report.required_candidates,
+            optional_candidates=dep_report.optional_candidates,
         )
         return profile, plan
 
@@ -4558,6 +5218,14 @@ class SmartPresenter:
         else:
             lines.append("Persistent Data : Container storage (no mounted data directories)")
 
+        if plan and plan.resource_budget:
+            rb = plan.resource_budget
+            lines.append(f"Storage Budget  : Estimated {rb.min_gib:.1f} - {rb.max_gib:.1f} GiB [{rb.verdict.value}]")
+            if rb.heavy_packages:
+                lines.append(f"Heavy Packages  : {', '.join(rb.heavy_packages)}")
+            if rb.verdict == StorageVerdict.BLOCKED:
+                lines.append("  [!] INSUFFICIENT STORAGE: Build will be blocked until space is freed.")
+
         if profile.risk_findings:
             lines.append("Risk Findings   : " + " | ".join(profile.risk_findings))
         else:
@@ -4748,6 +5416,10 @@ class Console:
                 raise OpsError("'run' is for interactive CLI applications. Use job or up for other projects.")
             if pending.name == 'job' and kind != 'batch':
                 raise OpsError("'job' requires a batch application (kind batch).")
+            if pending.name == "build":
+                plan = self._plan()
+                if plan.resource_budget and plan.resource_budget.verdict == StorageVerdict.BLOCKED:
+                    raise OpsError(f"Docker build aborted: insufficient storage. {plan.resource_budget.explanations[0]}. Free up disk space or prune unused images before retrying.")
             DockerAdapter(root, pending.settings.docker_context).run(pending.name)
             if pending.name == "up":
                 print("Docker start command completed. Run verify to inspect health and logs for failures.")
@@ -4835,6 +5507,17 @@ class Console:
                 else:
                     adapter = DockerAdapter(root, pending.settings.docker_context)
                     adapter.preflight()
+                    if plan.resource_budget and plan.resource_budget.verdict == StorageVerdict.BLOCKED:
+                        print("\n" + "=" * 80)
+                        print("DEPLOYMENT BLOCKED — INSUFFICIENT DOCKER STORAGE")
+                        print("=" * 80)
+                        print(f"Estimated build requires at least {plan.resource_budget.min_gib:.1f} GiB.")
+                        print(plan.resource_budget.explanations[0] if plan.resource_budget.explanations else "")
+                        for rec in plan.resource_budget.recommendations:
+                            print(f"  • {rec}")
+                        print("=" * 80)
+                        self.smart_stage = "result"
+                        return
                     print("\nBuilding container image...")
                     adapter.run("build")
                     print("\nStarting container services...")
@@ -9062,7 +9745,7 @@ def self_test() -> bool:
 
 
         def test_brand_and_version(self):
-            self.assertEqual(VERSION, "3.0.0-rc9")
+            self.assertEqual(VERSION, "3.0.0-rc10")
             _, files = self.config()
             self.assertEqual(json.loads(files["manifest.json"])["generator"], "Auto Docker")
             self.assertIn("Auto Docker", files["INSTRUCTIONS.txt"])
@@ -12736,6 +13419,270 @@ if __name__ == '__main__':
                 # Hitting enter (empty string) on home runs project
                 con.feed_input("")
                 self.assertEqual(con.smart_stage, "understand")
+
+        # ---------- Auto Docker RC10 Tests: Resource-Aware Containerization ----------
+
+        def test_rc10_docker_storage_status_and_verdicts(self):
+            self.assertEqual(StorageVerdict.SUFFICIENT.value, "SUFFICIENT")
+            self.assertEqual(StorageVerdict.WARNING.value, "WARNING")
+            self.assertEqual(StorageVerdict.BLOCKED.value, "BLOCKED")
+            self.assertEqual(StorageVerdict.UNKNOWN.value, "UNKNOWN")
+
+            st = DockerStorageStatus(
+                engine_accessible=True,
+                docker_root_dir="/var/lib/docker",
+                storage_driver="overlay2",
+                daemon_free_bytes=10 * 1024**3,
+                daemon_total_bytes=100 * 1024**3,
+                reclaimable_build_cache_bytes=2 * 1024**3,
+                reclaimable_images_bytes=1 * 1024**3,
+                is_remote_context=False,
+                is_vm_isolated=False,
+                assessment_status="CONFIRMED",
+                details="10.0 GiB free on Docker storage"
+            )
+            self.assertEqual(round(st.free_gib, 1), 10.0)
+            self.assertEqual(round(st.total_gib, 1), 100.0)
+            self.assertEqual(round(st.reclaimable_gib, 1), 3.0)
+
+        def test_rc10_docker_storage_probe_cli_missing(self):
+            with patch("shutil.which", return_value=None):
+                status = DockerStorageProbe.probe()
+                self.assertFalse(status.engine_accessible)
+                self.assertEqual(status.assessment_status, "UNKNOWN")
+                self.assertIn("not found", status.details)
+
+        def test_rc10_docker_storage_probe_remote_context(self):
+            with patch("shutil.which", return_value="/usr/bin/docker"), \
+                 patch("subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout='"ssh://operator@remote-host:22"\n'
+                )
+                status = DockerStorageProbe.probe(context="remote-cluster")
+                self.assertTrue(status.is_remote_context)
+                self.assertEqual(status.assessment_status, "UNKNOWN")
+                self.assertIn("remote host", status.details)
+
+        def test_rc10_docker_storage_probe_vm_isolated(self):
+            fake_root = "/nonexistent/docker/root/dir"
+            with patch("shutil.which", return_value="/usr/bin/docker"), \
+                 patch("subprocess.run") as mock_run:
+                # Docker info succeeds reporting an inaccessible VM directory
+                mock_run.side_effect = [
+                    subprocess.CompletedProcess(args=[], returncode=0, stdout=f"{fake_root}|overlay2\n"),
+                    subprocess.CompletedProcess(args=[], returncode=0, stdout=""),
+                ]
+                with patch("pathlib.Path.is_dir", return_value=False):
+                    status = DockerStorageProbe.probe()
+                    self.assertTrue(status.is_vm_isolated)
+                    self.assertEqual(status.assessment_status, "UNKNOWN")
+
+        def test_rc10_resource_budget_estimator_ranges_and_verdicts(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                (root / "app.py").write_text("print('hello')\n")
+
+                # Ample space (50 GiB free): SUFFICIENT
+                storage_ample = DockerStorageStatus(
+                    engine_accessible=True, docker_root_dir="/var/lib/docker",
+                    storage_driver="overlay2", daemon_free_bytes=50 * 1024**3,
+                    daemon_total_bytes=100 * 1024**3, reclaimable_build_cache_bytes=0,
+                    reclaimable_images_bytes=0, is_remote_context=False,
+                    is_vm_isolated=False, assessment_status="CONFIRMED", details="50 GiB free"
+                )
+                budget_ample = ResourceBudgetEstimator.estimate(
+                    base_image="python:3.12-slim-bookworm",
+                    packages=["fastapi", "uvicorn"],
+                    root=root,
+                    storage_status=storage_ample
+                )
+                self.assertEqual(budget_ample.verdict, StorageVerdict.SUFFICIENT)
+                self.assertGreater(budget_ample.min_gib, 0.1)
+                self.assertGreater(budget_ample.max_gib, budget_ample.min_gib)
+
+                # Tight space (headroom < 1.0 GiB): WARNING
+                storage_tight = DockerStorageStatus(
+                    engine_accessible=True, docker_root_dir="/var/lib/docker",
+                    storage_driver="overlay2",
+                    daemon_free_bytes=int(budget_ample.total_bytes_max + 200 * 1024 * 1024),
+                    daemon_total_bytes=100 * 1024**3, reclaimable_build_cache_bytes=0,
+                    reclaimable_images_bytes=0, is_remote_context=False,
+                    is_vm_isolated=False, assessment_status="CONFIRMED", details="tight"
+                )
+                budget_tight = ResourceBudgetEstimator.estimate(
+                    base_image="python:3.12-slim-bookworm",
+                    packages=["fastapi", "uvicorn"],
+                    root=root,
+                    storage_status=storage_tight
+                )
+                self.assertEqual(budget_tight.verdict, StorageVerdict.WARNING)
+
+                # Deficit space (free < min_bytes): BLOCKED
+                storage_blocked = DockerStorageStatus(
+                    engine_accessible=True, docker_root_dir="/var/lib/docker",
+                    storage_driver="overlay2",
+                    daemon_free_bytes=50 * 1024 * 1024,
+                    daemon_total_bytes=100 * 1024**3, reclaimable_build_cache_bytes=0,
+                    reclaimable_images_bytes=0, is_remote_context=False,
+                    is_vm_isolated=False, assessment_status="CONFIRMED", details="blocked"
+                )
+                budget_blocked = ResourceBudgetEstimator.estimate(
+                    base_image="python:3.12-slim-bookworm",
+                    packages=["fastapi", "uvicorn"],
+                    root=root,
+                    storage_status=storage_blocked
+                )
+                self.assertEqual(budget_blocked.verdict, StorageVerdict.BLOCKED)
+
+        def test_rc10_dependency_ast_visitor_categorization(self):
+            code = """
+import os
+import sys
+import numpy
+from pandas import DataFrame
+
+try:
+    import catboost
+except ImportError:
+    pass
+
+if True:
+    import scipy
+
+def lazy_load():
+    import xgboost
+"""
+            tree = ast.parse(code)
+            visitor = DependencyAstVisitor()
+            visitor.visit(tree)
+
+            self.assertIn("os", visitor.required_imports)
+            self.assertIn("numpy", visitor.required_imports)
+            self.assertIn("pandas", visitor.required_imports)
+
+            self.assertIn("catboost", visitor.optional_imports)
+            self.assertIn("scipy", visitor.optional_imports)
+            self.assertIn("xgboost", visitor.optional_imports)
+            self.assertNotIn("catboost", visitor.required_imports)
+
+        def test_rc10_ml_workload_preflight_prevents_disk_exhaustion(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir)
+                ml_script = """
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+
+try:
+    import catboost
+    import lightgbm
+    import xgboost
+    import mlflow
+except ImportError:
+    pass
+"""
+                (repo / "ml_pipeline.py").write_text(ml_script)
+                target = Target(repo, pinned="ml_pipeline.py")
+                settings = Settings(target)
+
+                # Mock a host with only 2 GiB free space
+                mock_storage = DockerStorageStatus(
+                    engine_accessible=True,
+                    docker_root_dir="/var/lib/docker",
+                    storage_driver="overlay2",
+                    daemon_free_bytes=2 * 1024**3,
+                    daemon_total_bytes=20 * 1024**3,
+                    reclaimable_build_cache_bytes=500 * 1024**2,
+                    reclaimable_images_bytes=0,
+                    is_remote_context=False,
+                    is_vm_isolated=False,
+                    assessment_status="CONFIRMED",
+                    details="2.0 GiB free on Docker storage"
+                )
+                DockerStorageProbe.set_mock(mock_storage)
+                try:
+                    profile, plan = SmartDecisionEngine.analyze(repo, settings)
+                    self.assertIsNotNone(plan)
+                    # Verify optional candidates detected
+                    self.assertIn("catboost", profile.optional_candidates)
+                    self.assertIn("lightgbm", profile.optional_candidates)
+                    self.assertIn("xgboost", profile.optional_candidates)
+                    self.assertIn("mlflow", profile.optional_candidates)
+
+                    # Verify required candidates separated
+                    self.assertIn("numpy", profile.required_candidates)
+                    self.assertIn("pandas", profile.required_candidates)
+                    self.assertIn("scikit-learn", profile.required_candidates)
+
+                    # Resource budget warns or blocks on storage
+                    self.assertIsNotNone(plan.resource_budget)
+                    self.assertIn(plan.resource_budget.verdict, (StorageVerdict.WARNING, StorageVerdict.BLOCKED))
+                finally:
+                    DockerStorageProbe.set_mock(None)
+
+        def test_rc10_smart_deploy_blocks_on_storage_deficit(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir)
+                (repo / "app.py").write_text("print('test')\n")
+                con = Console(Settings(target_for(str(repo))))
+                con.ui_mode = "smart"
+
+                # Mock storage deficit
+                deficit_storage = DockerStorageStatus(
+                    engine_accessible=True,
+                    docker_root_dir="/var/lib/docker",
+                    storage_driver="overlay2",
+                    daemon_free_bytes=10 * 1024 * 1024,
+                    daemon_total_bytes=10 * 1024**3,
+                    reclaimable_build_cache_bytes=0,
+                    reclaimable_images_bytes=0,
+                    is_remote_context=False,
+                    is_vm_isolated=False,
+                    assessment_status="CONFIRMED",
+                    details="10 MB free"
+                )
+                DockerStorageProbe.set_mock(deficit_storage)
+                try:
+                    con.smart_stage = "understand"
+                    con.feed_input("1")
+                    self.assertEqual(con.smart_stage, "review")
+
+                    # Stage deployment
+                    con.feed_input("1")
+                    self.assertEqual(con.pending.name, "smart_deploy")
+
+                    # Mock DockerAdapter to ensure build is never reached
+                    with patch.object(DockerAdapter, "run") as mock_run, \
+                         patch.object(DockerAdapter, "preflight"):
+                        con.feed_input("YES")
+                        mock_run.assert_not_called()
+                finally:
+                    DockerStorageProbe.set_mock(None)
+
+        def test_rc10_accelerator_policy_detection(self):
+            with patch("shutil.which", return_value="/usr/bin/nvidia-smi"), \
+                 patch("subprocess.run") as mock_run:
+                mock_run.side_effect = [
+                    subprocess.CompletedProcess(args=[], returncode=0, stdout="NVIDIA RTX 4090\n"),
+                    subprocess.CompletedProcess(args=[], returncode=0, stdout='["runc", "nvidia"]\n'),
+                ]
+                accel = AcceleratorPolicy.probe()
+                self.assertTrue(accel.has_gpu_hardware)
+                self.assertTrue(accel.has_docker_gpu_runtime)
+                self.assertTrue(accel.gpu_usable_in_docker)
+                self.assertEqual(accel.gpu_name, "NVIDIA RTX 4090")
+
+        def test_rc10_cpu_wheel_index_rendering(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir)
+                (repo / "app.py").write_text("import torch\nprint(torch.__version__)\n")
+                target = Target(repo, pinned="app.py")
+                settings = Settings(target, dependency_mode="infer", gpu=False)
+                insp = Inspector().inspect(target)
+                plan = Planner().build(settings, insp)
+                files = Renderer().files(plan)
+                dockerfile = files["Dockerfile"]
+                self.assertIn("--index-url https://download.pytorch.org/whl/cpu", dockerfile)
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(Tests)
     outcome = unittest.TextTestRunner(verbosity=2).run(suite)

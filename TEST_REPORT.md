@@ -1,7 +1,7 @@
-# Auto Docker 3.0 RC9 — Test Report & Verification Evidence
+# Auto Docker 3.0 RC10 — Test Report & Verification Evidence
 
-**Date & Time**: 2026-11-10T20:55:00+05:30  
-**Application Version**: `3.0.0-rc9`  
+**Date & Time**: 2026-11-10T23:15:00+05:30  
+**Application Version**: `3.0.0-rc10`  
 **Python Runtime**: Python 3.13.14 on Windows  
 **Host Environment**: Windows 11 AMD64 (Local Docker Engine: Missing / Unavailable)  
 
@@ -9,16 +9,33 @@
 
 ## 1. Executive Summary
 
-- **Total Unit & Acceptance Tests Executed**: 344
-- **Passed**: 338
-- **Skipped**: 6 (POSIX-only pseudo-terminal and process-probing tests on Windows; all 344 pass on Linux CI)
+- **Total Unit & Acceptance Tests Executed**: 354
+- **Passed**: 348
+- **Skipped**: 6 (POSIX-only pseudo-terminal and process-probing tests on Windows; all 354 pass on Linux CI)
 - **Failed**: 0
 - **Errors**: 0
-- **Execution Time**: 29.018 seconds
+- **Execution Time**: 34.774 seconds
 
 ---
 
 ## 2. Test Suite Breakdown
+
+### 2.0 RC10 Resource-Aware Containerization Tests (`test_rc10_*`)
+- **Total RC10 Tests**: 10
+- **Passed**: 10, **Failed**: 0
+
+| Test Method | Description | Outcome |
+|:---|:---|:---:|
+| `test_rc10_docker_storage_status_and_verdicts` | Validates `DockerStorageStatus` fields, `free_gib`, `total_gib`, `reclaimable_gib`, and `StorageVerdict` enum values. | **PASS** |
+| `test_rc10_docker_storage_probe_cli_missing` | Validates `DockerStorageProbe.probe()` reports `UNKNOWN` with actionable diagnostics when Docker CLI is missing. | **PASS** |
+| `test_rc10_docker_storage_probe_remote_context` | Validates remote Docker contexts report `UNKNOWN` rather than falsely measuring local host disk space. | **PASS** |
+| `test_rc10_docker_storage_probe_vm_isolated` | Validates VM-isolated storage roots (Docker Desktop on Windows WSL2/Hyper-V) report `UNKNOWN` with `is_vm_isolated=True`. | **PASS** |
+| `test_rc10_resource_budget_estimator_ranges_and_verdicts` | Validates deterministic range calculation and verdicts across `SUFFICIENT`, `WARNING` ($<$ 1 GiB buffer), and `BLOCKED` (free $<$ min). | **PASS** |
+| `test_rc10_dependency_ast_visitor_categorization` | Validates `DependencyAstVisitor` AST separation of top-level imports from `try...except`, conditional, and function imports. | **PASS** |
+| `test_rc10_ml_workload_preflight_prevents_disk_exhaustion` | Simulates Enterprise AutoML workload on 2 GiB free space, verifying optional candidate separation and storage warning. | **PASS** |
+| `test_rc10_smart_deploy_blocks_on_storage_deficit` | Validates SMART Mode deploy halts before build execution when storage budget verdict is `BLOCKED`. | **PASS** |
+| `test_rc10_accelerator_policy_detection` | Validates physical NVIDIA GPU hardware detection vs Docker daemon `nvidia` container runtime support. | **PASS** |
+| `test_rc10_cpu_wheel_index_rendering` | Validates CPU-mode PyTorch renders `--index-url https://download.pytorch.org/whl/cpu` without unsafe index mixing. | **PASS** |
 
 ### 2.1 Baseline Regression Suite (RC5 Functionality)
 - **Total Tests**: 228

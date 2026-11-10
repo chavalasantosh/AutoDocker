@@ -1,3 +1,42 @@
+# Auto Docker 3.0 RC10 — Release Notes
+
+## Version Overview
+- **Release**: Auto Docker 3.0 RC10 (Resource-Aware Containerization Release)
+- **Architecture**: Single-file Python standard-library automation (`auto_docker.py`)
+- **Key Focus**: Predictive Docker storage budgeting, dependency intelligence with guarded import segregation, safe CPU/GPU accelerator policies, and pre-build disk exhaustion prevention.
+
+---
+
+## What's New in 3.0 RC10 (Resource-Aware Containerization)
+
+### 1. Docker Storage Probing (`DockerStorageProbe`)
+- **Docker Root Isolation**: Directly discovers and probes Docker daemon storage (e.g. `/var/lib/docker`) and available capacity, rather than confusing the project workspace filesystem with Docker Engine storage.
+- **VM and Remote Context Awareness**: Correctly classifies isolated Docker Desktop VM storage (Hyper-V / WSL2 on Windows, Linux VM on macOS) and remote daemon contexts (TCP/SSH) as `UNKNOWN` with explicit advisories instead of reporting misleading host disk metrics.
+- **Reclaimable Space Detection**: Non-destructively inspects `docker system df` to report reclaimable build cache and dangling images without mutating or pruning anything automatically.
+
+### 2. Predictive Resource Budget Engine (`ResourceBudgetEstimator`)
+- **Deterministic Storage Range Estimation**: Calculates lower (`min_bytes`) and upper (`max_bytes`) storage boundaries based on base image footprint, package wheel archives, layer extraction expansion factors, and context payload size.
+- **Pre-Build Headroom Verdicts**:
+  - `SUFFICIENT`: Storage capacity verified with at least 1.0 GiB safety buffer.
+  - `WARNING`: Storage is tight; build requires estimated need with less than 1.0 GiB buffer.
+  - `BLOCKED`: Available storage is strictly less than estimated minimum build requirements; halts build before starting to prevent host disk exhaustion.
+  - `UNKNOWN`: Remote or isolated daemon storage; advises required free space threshold.
+- **Operator Safety Halt**: Halts deployment during approval when storage verdict is `BLOCKED`, preventing `failed to extract layer: no space left on device` failures.
+
+### 3. Dependency Intelligence 3.0 & Guarded Import Segregation (`DependencyAstVisitor`)
+- **AST Scope Context Analysis**: Categorizes dependencies into:
+  - `DECLARED`: Explicitly pinned in `requirements.txt`, `pyproject.toml`, `setup.cfg`, `setup.py`, `Pipfile`, or `environment.yml`.
+  - `REQUIRED_CANDIDATE`: Top-level unconditional imports executed upon module load.
+  - `OPTIONAL_CANDIDATE`: Imports wrapped inside `try...except ImportError`, dynamic conditionals, or lazy runtime functions.
+  - `UNKNOWN`: Unrecognized imports not present in standard library or curated PyPI mappings.
+- **ML Workload Protection**: Solves image bloat on complex ML projects (e.g. AutoML benchmarks with guarded `catboost`, `lightgbm`, `xgboost`, `mlflow`). By isolating optional candidate packages, minimal builds remain lightweight (~350 MB) rather than expanding to multi-gigabytes unless requested.
+
+### 4. Safe CPU/GPU Accelerator Policy (`AcceleratorPolicy`)
+- **Hardware vs Daemon Runtime Distinction**: Discovers physical NVIDIA GPU hardware via `nvidia-smi` while separately checking if Docker daemon has the `nvidia` container runtime installed.
+- **Safe PyPI Index Selection**: Defaults to official PyPI CPU wheels (`--index-url https://download.pytorch.org/whl/cpu`) when running without GPU, saving 2.5+ GiB per build while strictly avoiding unsafe `--extra-index-url` mixing.
+
+---
+
 # Auto Docker 3.0 RC9 — Release Notes
 
 ## Version Overview
