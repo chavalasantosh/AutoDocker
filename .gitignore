@@ -42,3 +42,5 @@ autodocker_*.jpg
 target/
 rust/target/
 **/*.rs.bk
+*.exe
+*.pdb

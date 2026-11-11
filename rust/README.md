@@ -70,3 +70,4 @@ The compiled binary will be located at `rust/target/release/autodocker` (or `aut
 cd rust
 cargo test
 ```
+
