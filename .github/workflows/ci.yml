@@ -114,3 +114,8 @@ jobs:
           cd rust
           cargo test --verbose
           cargo run -- self-test
+
+      - name: Verify Single-File Rust Compilation & Self-Test
+        run: |
+          rustc --edition 2021 -O auto_docker.rs
+          ./auto_docker self-test
