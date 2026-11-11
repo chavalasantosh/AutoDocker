@@ -93,3 +93,24 @@ jobs:
           python auto_docker.py generate /tmp/test_project --yes
           python auto_docker.py check /tmp/test_project
           python auto_docker.py preview /tmp/test_project
+
+  rust-verification:
+    name: Rust Core Engine (cargo check & test)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Rust Compilation
+        run: |
+          cd rust
+          cargo check --verbose
+
+      - name: Run Rust Unit & Self-Test Suite
+        run: |
+          cd rust
+          cargo test --verbose
+          cargo run -- self-test
