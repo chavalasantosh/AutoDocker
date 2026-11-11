@@ -37,3 +37,8 @@ htmlcov/
 # Local showcase assets
 autodocker_*.png
 autodocker_*.jpg
+
+# Rust build artifacts
+target/
+rust/target/
+**/*.rs.bk
