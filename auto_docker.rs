@@ -843,7 +843,7 @@ impl DockerStorageProbe {
             .args(&["info", "--format", "{{.DockerRootDir}}|{{.Driver}}|{{.ServerVersion}}"])
             .output();
 
-        let (root_dir, driver, server_ver, accessible) = match info_res {
+        let (root_dir, driver, _server_ver, accessible) = match info_res {
             Ok(ref out) if out.status.success() => {
                 let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 let parts: Vec<&str> = text.split('|').collect();
@@ -877,10 +877,10 @@ impl DockerStorageProbe {
             };
         }
 
-        let is_windows = env::consts::OS == "windows";
-        let is_vm_isolated = if is_windows {
+        let is_non_linux = env::consts::OS != "linux";
+        let is_vm_isolated = if is_non_linux {
             if let Some(ref dir) = root_dir {
-                dir.starts_with("/var/lib/docker") || dir.starts_with("/mnt")
+                dir.starts_with('/') || dir.starts_with("\\\\")
             } else {
                 true
             }
@@ -889,13 +889,35 @@ impl DockerStorageProbe {
         };
 
         let mut daemon_free = None;
-        let daemon_total = None;
+        let mut daemon_total = None;
+        let mut assessment_status = "UNKNOWN".to_string();
 
-        if !is_vm_isolated {
-            if let Some(ref dir) = root_dir {
-                let p = Path::new(dir);
-                if p.is_dir() {
-                    daemon_free = Some(30 * 1024 * 1024 * 1024);
+        if is_vm_isolated {
+            // Under Docker Desktop (Windows/macOS), the daemon runs inside a Linux VM.
+            // Host filesystem calls would erroneously inspect the host OS drive.
+            daemon_free = None;
+            daemon_total = None;
+            assessment_status = "UNKNOWN".to_string();
+        } else if let Some(ref dir) = root_dir {
+            // On native Linux, probe actual storage via df without assuming fake space
+            let df_probe = Command::new("df").args(&["-B1", dir.as_str()]).output();
+            if let Ok(out) = df_probe {
+                if out.status.success() {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    let lines: Vec<&str> = text.lines().collect();
+                    if lines.len() >= 2 {
+                        let tokens: Vec<&str> = lines[1].split_whitespace().collect();
+                        // Filesystem, 1B-blocks, Used, Available, Use%, Mounted on
+                        if tokens.len() >= 4 {
+                            let total_val: Option<u64> = tokens[1].parse().ok();
+                            let avail_val: Option<u64> = tokens[3].parse().ok();
+                            if let Some(avail) = avail_val {
+                                daemon_free = Some(avail);
+                                daemon_total = total_val;
+                                assessment_status = "CONFIRMED".to_string();
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -919,13 +941,13 @@ impl DockerStorageProbe {
 
         let details = if is_vm_isolated {
             format!(
-                "Docker Desktop/WSL2 isolated VM (Engine v{})",
-                server_ver.as_deref().unwrap_or("unknown")
+                "Docker daemon storage root ({}) is isolated inside VM/WSL2; host disk space does not reflect daemon space.",
+                root_dir.as_deref().unwrap_or("/var/lib/docker")
             )
         } else if let Some(free) = daemon_free {
             format!("{:.1} GiB free ({})", free as f64 / 1024.0 / 1024.0 / 1024.0, root_dir.as_deref().unwrap_or(""))
         } else {
-            "Storage access restricted or isolated".to_string()
+            "Storage access restricted or isolated (unmeasured from host)".to_string()
         };
 
         DockerStorageStatus {
@@ -938,7 +960,7 @@ impl DockerStorageProbe {
             reclaimable_images_bytes: 0,
             is_remote_context: context.is_some(),
             is_vm_isolated,
-            assessment_status: "CONFIRMED".to_string(),
+            assessment_status,
             details,
         }
     }
@@ -1005,7 +1027,7 @@ impl ResourceBudgetEstimator {
         let (verdict, confidence) = if !storage.engine_accessible {
             (StorageVerdict::Unknown, "LOW (Engine offline)".to_string())
         } else if storage.is_vm_isolated {
-            (StorageVerdict::Sufficient, "MEDIUM (Docker VM isolated storage)".to_string())
+            (StorageVerdict::Unknown, "UNKNOWN (Storage isolated in VM/WSL2; verify within Docker Desktop)".to_string())
         } else if let Some(free) = storage.daemon_free_bytes {
             if free < total_bytes_min + safety_reserve {
                 (StorageVerdict::Blocked, "HIGH (Deficit confirmed)".to_string())
@@ -1015,7 +1037,7 @@ impl ResourceBudgetEstimator {
                 (StorageVerdict::Sufficient, "HIGH".to_string())
             }
         } else {
-            (StorageVerdict::Sufficient, "MEDIUM".to_string())
+            (StorageVerdict::Unknown, "LOW (Storage capacity unmeasured)".to_string())
         };
 
         let mut explanations = Vec::new();
@@ -1026,6 +1048,8 @@ impl ResourceBudgetEstimator {
                 storage.free_gib(),
                 safety_reserve as f64 / 1024.0 / 1024.0 / 1024.0
             ));
+        } else if verdict == StorageVerdict::Unknown && storage.is_vm_isolated {
+            explanations.push("Docker daemon storage root is isolated inside VM/WSL2; host disk space cannot be assumed as Docker storage.".to_string());
         }
 
         ResourceBudget {
@@ -1313,7 +1337,7 @@ impl Renderer {
         if !plan.published_ports.is_empty() {
             out.push_str("    ports:\n");
             for p in &plan.published_ports {
-                out.push_str(&format!("      - \"127.0.0.1:{}:{}\n", p.host, p.container));
+                out.push_str(&format!("      - \"127.0.0.1:{}:{}\"\n", p.host, p.container));
             }
         }
 
@@ -1899,7 +1923,6 @@ impl ResourceCleaner {
                 }
             }
         }
-        let _ = Command::new("docker").args(&["builder", "prune", "-f"]).output();
         Ok(count)
     }
 }
@@ -2776,7 +2799,7 @@ pub fn main() {
 }
 
 // ============================================================================
-// 24. Extended Built-in Self-Test Suite (14 Tests)
+// 24. Extended Built-in Self-Test Suite (15 Tests)
 // ============================================================================
 
 fn run_self_test() {
@@ -2784,7 +2807,7 @@ fn run_self_test() {
     println!("AUTO DOCKER (RUST SINGLE-FILE) — EXTENDED SELF-TEST SUITE");
     println!("================================================================================\n");
 
-    let tests: [(&str, fn() -> Result<(), String>); 14] = [
+    let tests: [(&str, fn() -> Result<(), String>); 15] = [
         ("test_ast_visitor_main_guard_and_type_checking", || {
             let code = "import os\nfrom typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import mypy_boto3\nif __name__ == '__main__':\n    import uvicorn\n";
             let mut v = DependencyAstVisitor::new();
@@ -2934,6 +2957,35 @@ fn run_self_test() {
             let compose = files.get("compose.yaml").ok_or("compose.yaml missing")?;
             if !compose.contains("healthcheck:") || !compose.contains("socket.create_connection") {
                 return Err("TCP loopback healthcheck missing from compose.yaml".to_string());
+            }
+            if !compose.contains("\"127.0.0.1:8000:8000\"") {
+                return Err("Published port missing closing quote in compose.yaml".to_string());
+            }
+            Ok(())
+        }),
+        ("test_vm_isolated_storage_verdict_unknown", || {
+            let storage = DockerStorageStatus {
+                engine_accessible: true,
+                docker_root_dir: Some("/var/lib/docker".to_string()),
+                storage_driver: Some("overlay2".to_string()),
+                daemon_free_bytes: None,
+                daemon_total_bytes: None,
+                reclaimable_build_cache_bytes: 0,
+                reclaimable_images_bytes: 0,
+                is_remote_context: false,
+                is_vm_isolated: true,
+                assessment_status: "UNKNOWN".to_string(),
+                details: "Docker daemon storage root is isolated inside VM/WSL2".to_string(),
+            };
+            let budget = ResourceBudgetEstimator::estimate(
+                "python:3.12-slim-bookworm",
+                &["fastapi".to_string()],
+                Path::new("."),
+                &storage,
+                &[],
+            );
+            if budget.verdict != StorageVerdict::Unknown {
+                return Err("VM isolated storage was not marked as UNKNOWN".to_string());
             }
             Ok(())
         }),
