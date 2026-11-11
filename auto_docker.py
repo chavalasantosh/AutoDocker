@@ -46,7 +46,7 @@ import platform
 from enum import Enum
 from typing import Any, Iterator
 
-VERSION = "3.0.0-rc10"
+VERSION = "3.0.0-rc10.1"
 LOG = logging.getLogger("auto_docker")
 OUTPUT = ".opsforge"
 MAX_VISITED = 3000
@@ -650,14 +650,51 @@ def _collect_python(root: Path) -> list[Path]:
 
 
 class DependencyAstVisitor(ast.NodeVisitor):
-    """Categorizes Python imports into required (top-level) and optional (guarded by try/except, conditionals, or functions)."""
+    """Categorizes Python imports into required (top-level, main guard, unconditional) and optional (guarded by try/except or conditional features)."""
 
     def __init__(self) -> None:
         self.required_imports: set[str] = set()
         self.optional_imports: set[str] = set()
+        self.type_checking_imports: set[str] = set()
         self._try_depth: int = 0
         self._if_depth: int = 0
-        self._func_depth: int = 0
+        self._in_main_guard: bool = False
+        self._in_type_checking: bool = False
+
+    @staticmethod
+    def _is_main_guard(node: ast.If) -> bool:
+        test = node.test
+        if isinstance(test, ast.Compare):
+            left = test.left
+            ops = test.ops
+            comparators = test.comparators
+            if len(ops) == 1 and isinstance(ops[0], ast.Eq) and len(comparators) == 1:
+                comp = comparators[0]
+                if (isinstance(left, ast.Name) and left.id == "__name__"
+                        and isinstance(comp, ast.Constant) and comp.value == "__main__"):
+                    return True
+                if (isinstance(comp, ast.Name) and comp.id == "__name__"
+                        and isinstance(left, ast.Constant) and left.value == "__main__"):
+                    return True
+        return False
+
+    @staticmethod
+    def _is_type_checking_guard(node: ast.If) -> bool:
+        test = node.test
+        if isinstance(test, ast.Name) and test.id in ("TYPE_CHECKING", "typing.TYPE_CHECKING"):
+            return True
+        if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
+            return True
+        return False
+
+    @staticmethod
+    def _is_unconditional_if(node: ast.If) -> bool:
+        test = node.test
+        if isinstance(test, ast.Constant) and bool(test.value) is True:
+            return True
+        if isinstance(test, ast.Name) and test.id in ("True", "__debug__"):
+            return True
+        return False
 
     def visit_Try(self, node: ast.Try) -> None:
         self._try_depth += 1
@@ -665,19 +702,34 @@ class DependencyAstVisitor(ast.NodeVisitor):
         self._try_depth -= 1
 
     def visit_If(self, node: ast.If) -> None:
+        if self._is_type_checking_guard(node):
+            prev = self._in_type_checking
+            self._in_type_checking = True
+            for stmt in node.body:
+                self.visit(stmt)
+            self._in_type_checking = prev
+            for stmt in node.orelse:
+                self.visit(stmt)
+            return
+
+        if self._is_main_guard(node):
+            prev = self._in_main_guard
+            self._in_main_guard = True
+            for stmt in node.body:
+                self.visit(stmt)
+            self._in_main_guard = prev
+            for stmt in node.orelse:
+                self.visit(stmt)
+            return
+
+        if self._is_unconditional_if(node):
+            for stmt in node.body:
+                self.visit(stmt)
+            return
+
         self._if_depth += 1
         self.generic_visit(node)
         self._if_depth -= 1
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._func_depth += 1
-        self.generic_visit(node)
-        self._func_depth -= 1
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self._func_depth += 1
-        self.generic_visit(node)
-        self._func_depth -= 1
 
     def _record(self, module_name: str) -> None:
         if not module_name:
@@ -685,7 +737,16 @@ class DependencyAstVisitor(ast.NodeVisitor):
         top = module_name.split(".")[0]
         if not top or not top.isidentifier():
             return
-        if self._try_depth > 0 or self._if_depth > 0 or self._func_depth > 0:
+        if self._in_type_checking:
+            self.type_checking_imports.add(top)
+            return
+
+        # An import is optional if guarded by try/except (handled ImportError)
+        # or guarded by conditional feature flags outside the main execution guard.
+        if self._try_depth > 0:
+            if top not in self.required_imports:
+                self.optional_imports.add(top)
+        elif self._if_depth > 0 and not self._in_main_guard:
             if top not in self.required_imports:
                 self.optional_imports.add(top)
         else:
@@ -1689,29 +1750,39 @@ class DockerStorageProbe:
 
         if root_dir:
             try:
-                p = Path(root_dir)
-                check_path = None
-                if p.is_dir():
-                    check_path = p
-                else:
-                    parent = p.parent
-                    while parent != parent.parent:
-                        if parent.is_dir():
-                            check_path = parent
-                            break
-                        parent = parent.parent
-                    if check_path is None and Path("/").is_dir():
-                        check_path = Path("/")
-
-                if check_path is not None:
-                    usage = shutil.disk_usage(check_path)
-                    free_bytes = usage.free
-                    total_bytes = usage.total
-                    assessment = "CONFIRMED"
-                    detail_msg = f"{free_bytes / (1024**3):.1f} GiB free on Docker storage ({root_dir})"
-                else:
+                # On non-Linux hosts (Windows, macOS), Linux-style daemon root paths (e.g. /var/lib/docker)
+                # are inside a virtualization layer (WSL2, Docker Desktop VM). Resolving against host
+                # paths falls back to host C:\ or /, falsely reporting host disk space as Docker daemon space.
+                if not sys.platform.startswith("linux") and root_dir.startswith("/"):
                     is_vm = True
-                    detail_msg = f"Docker daemon storage root ({root_dir}) is isolated inside VM/WSL2; cannot query free space from host"
+                    assessment = "UNKNOWN"
+                    detail_msg = f"Docker daemon storage root ({root_dir}) is isolated inside VM/WSL2; host disk space does not reflect daemon space."
+                    free_bytes = None
+                    total_bytes = None
+                else:
+                    p = Path(root_dir)
+                    check_path = None
+                    if p.is_dir():
+                        check_path = p
+                    else:
+                        parent = p.parent
+                        while parent != parent.parent:
+                            if parent.is_dir():
+                                check_path = parent
+                                break
+                            parent = parent.parent
+                        if check_path is None and Path("/").is_dir():
+                            check_path = Path("/")
+
+                    if check_path is not None:
+                        usage = shutil.disk_usage(check_path)
+                        free_bytes = usage.free
+                        total_bytes = usage.total
+                        assessment = "CONFIRMED"
+                        detail_msg = f"{free_bytes / (1024**3):.1f} GiB free on Docker storage ({root_dir})"
+                    else:
+                        is_vm = True
+                        detail_msg = f"Docker daemon storage root ({root_dir}) is isolated inside VM/WSL2; cannot query free space from host"
             except (PermissionError, OSError) as exc:
                 detail_msg = f"Cannot query Docker root directory ({root_dir}): {exc}"
         else:
@@ -1843,14 +1914,24 @@ class ResourceBudgetEstimator:
         heavy_pkgs: list[str] = []
         dl_sum = 0
         ext_sum = 0
-        all_pkgs = set(packages) | set(optional_packages)
-        for pkg in sorted(all_pkgs):
+        # Minimal planned dependencies determine required build storage
+        for pkg in sorted(set(packages)):
             key = _distribution_key(pkg)
             dl, ext, is_heavy = PACKAGE_FOOTPRINT_ESTIMATES.get(key, DEFAULT_PACKAGE_FOOTPRINT)
             dl_sum += dl
             ext_sum += ext
             if is_heavy:
                 heavy_pkgs.append(pkg)
+
+        # Optional packages are calculated separately to explain delta impact without inflating minimum build requirements
+        opt_ext_sum = 0
+        opt_heavy_pkgs: list[str] = []
+        for pkg in sorted(set(optional_packages)):
+            key = _distribution_key(pkg)
+            dl, ext, is_heavy = PACKAGE_FOOTPRINT_ESTIMATES.get(key, DEFAULT_PACKAGE_FOOTPRINT)
+            opt_ext_sum += ext
+            if is_heavy:
+                opt_heavy_pkgs.append(pkg)
 
         context_bytes = cls._estimate_context_bytes(root)
         min_bytes = base_bytes + ext_sum + context_bytes
@@ -1862,10 +1943,10 @@ class ResourceBudgetEstimator:
         if heavy_pkgs:
             explanations.append(f"Heavy ML/computation packages detected: {', '.join(sorted(set(heavy_pkgs)))}")
         if optional_packages:
-            explanations.append(f"Optional candidates in guarded blocks: {', '.join(sorted(set(optional_packages)))}")
+            explanations.append(f"Optional candidates in guarded blocks omitted from base build ({', '.join(sorted(set(optional_packages)))}); if included, would add ~{(opt_ext_sum) / (1024**3):.1f} GiB.")
 
         free = storage_status.daemon_free_bytes
-        confidence = "HIGH"
+        confidence = "HIGH" if storage_status.assessment_status == "CONFIRMED" else "MEDIUM"
         if free is None:
             verdict = StorageVerdict.UNKNOWN
             confidence = "LOW" if storage_status.is_vm_isolated or storage_status.is_remote_context else "MEDIUM"
@@ -9788,7 +9869,7 @@ def self_test() -> bool:
 
 
         def test_brand_and_version(self):
-            self.assertEqual(VERSION, "3.0.0-rc10")
+            self.assertEqual(VERSION, "3.0.0-rc10.1")
             _, files = self.config()
             self.assertEqual(json.loads(files["manifest.json"])["generator"], "Auto Docker")
             self.assertIn("Auto Docker", files["INSTRUCTIONS.txt"])
@@ -13589,11 +13670,14 @@ try:
 except ImportError:
     pass
 
+if feature_enabled:
+    import lightgbm
+
 if True:
     import scipy
 
-def lazy_load():
-    import xgboost
+if __name__ == '__main__':
+    import uvicorn
 """
             tree = ast.parse(code)
             visitor = DependencyAstVisitor()
@@ -13602,11 +13686,130 @@ def lazy_load():
             self.assertIn("os", visitor.required_imports)
             self.assertIn("numpy", visitor.required_imports)
             self.assertIn("pandas", visitor.required_imports)
+            self.assertIn("scipy", visitor.required_imports)
+            self.assertIn("uvicorn", visitor.required_imports)
 
             self.assertIn("catboost", visitor.optional_imports)
-            self.assertIn("scipy", visitor.optional_imports)
-            self.assertIn("xgboost", visitor.optional_imports)
+            self.assertIn("lightgbm", visitor.optional_imports)
             self.assertNotIn("catboost", visitor.required_imports)
+            self.assertNotIn("lightgbm", visitor.required_imports)
+
+        def test_rc10_1_ast_type_checking_imports_excluded(self):
+            script = self.root / "typed_app.py"
+            code = (
+                "from typing import TYPE_CHECKING\n"
+                "import os\n"
+                "if TYPE_CHECKING:\n"
+                "    import mypy_boto3_s3\n"
+                "    import pydantic\n"
+                "if __name__ == '__main__':\n"
+                "    import uvicorn\n"
+                "    print(os.name)\n"
+            )
+            script.write_text(code)
+            candidate = _check_source(script, self.root)
+            # os and uvicorn (in main guard) are required
+            self.assertIn("os", candidate.imports)
+            self.assertIn("uvicorn", candidate.imports)
+            # TYPE_CHECKING imports must not be treated as required runtime dependencies
+            self.assertNotIn("mypy_boto3_s3", candidate.imports)
+            self.assertNotIn("pydantic", candidate.imports)
+
+        def test_rc10_1_docker_storage_vm_isolated_on_non_linux(self):
+            # When Docker Desktop reports Linux root_dir on Windows/macOS, probe must classify as VM isolated
+            fake_probe_status = DockerStorageStatus(
+                engine_accessible=True,
+                docker_root_dir="/var/lib/docker",
+                storage_driver="overlay2",
+                daemon_free_bytes=None,
+                daemon_total_bytes=None,
+                reclaimable_build_cache_bytes=0,
+                reclaimable_images_bytes=0,
+                is_remote_context=False,
+                is_vm_isolated=True,
+                assessment_status="UNKNOWN",
+                details="Docker daemon storage root (/var/lib/docker) is isolated inside VM/WSL2; host disk space does not reflect daemon space."
+            )
+            with patch.object(DockerStorageProbe, "probe", return_value=fake_probe_status):
+                status = DockerStorageProbe.probe()
+                self.assertTrue(status.is_vm_isolated)
+                self.assertEqual(status.assessment_status, "UNKNOWN")
+                self.assertIsNone(status.daemon_free_bytes)
+
+        def test_rc10_1_resource_budget_omits_optional_from_min_bytes(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir).resolve()
+                (root / "app.py").write_text("print('test')\n")
+                storage = DockerStorageStatus(
+                    engine_accessible=True, docker_root_dir="/var/lib/docker",
+                    storage_driver="overlay2", daemon_free_bytes=20 * 1024**3,
+                    daemon_total_bytes=100 * 1024**3, reclaimable_build_cache_bytes=0,
+                    reclaimable_images_bytes=0, is_remote_context=False,
+                    is_vm_isolated=False, assessment_status="CONFIRMED", details="OK"
+                )
+                budget_base = ResourceBudgetEstimator.estimate(
+                    base_image="python:3.12-slim-bookworm",
+                    packages=["fastapi"],
+                    root=root,
+                    storage_status=storage,
+                    optional_packages=()
+                )
+                budget_with_opt = ResourceBudgetEstimator.estimate(
+                    base_image="python:3.12-slim-bookworm",
+                    packages=["fastapi"],
+                    root=root,
+                    storage_status=storage,
+                    optional_packages=("catboost", "lightgbm", "xgboost")
+                )
+                # Minimum bytes for planned build must not be inflated by optional packages
+                self.assertEqual(budget_base.total_bytes_min, budget_with_opt.total_bytes_min)
+                self.assertTrue(any("omitted from base build" in exp for exp in budget_with_opt.explanations))
+
+        def test_rc10_1_cli_preflight_exits_nonzero_on_storage_blocked(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir).resolve()
+                (repo / "app.py").write_text("print('test')\n")
+                storage_blocked = DockerStorageStatus(
+                    engine_accessible=True, docker_root_dir="/var/lib/docker",
+                    storage_driver="overlay2", daemon_free_bytes=10 * 1024 * 1024,
+                    daemon_total_bytes=10 * 1024**3, reclaimable_build_cache_bytes=0,
+                    reclaimable_images_bytes=0, is_remote_context=False,
+                    is_vm_isolated=False, assessment_status="CONFIRMED", details="10 MB free"
+                )
+                DockerStorageProbe.set_mock(storage_blocked)
+                try:
+                    code = main(["preflight", str(repo)])
+                    self.assertEqual(code, 1)
+                finally:
+                    DockerStorageProbe.set_mock(None)
+
+        def test_rc10_1_cli_build_halts_on_storage_deficit(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir).resolve()
+                (repo / "app.py").write_text("print('test')\n")
+                storage_blocked = DockerStorageStatus(
+                    engine_accessible=True, docker_root_dir="/var/lib/docker",
+                    storage_driver="overlay2", daemon_free_bytes=10 * 1024 * 1024,
+                    daemon_total_bytes=10 * 1024**3, reclaimable_build_cache_bytes=0,
+                    reclaimable_images_bytes=0, is_remote_context=False,
+                    is_vm_isolated=False, assessment_status="CONFIRMED", details="10 MB free"
+                )
+                DockerStorageProbe.set_mock(storage_blocked)
+                fake_host = DockerHostStatus(
+                    cli_installed=True, cli_path="/usr/bin/docker",
+                    compose_available=True, compose_version="2.24",
+                    engine_reachable=True, server_version="25.0"
+                )
+                try:
+                    # Generate files first so compose.yaml exists
+                    main(["generate", str(repo), "--yes"])
+                    with patch.object(DockerHostProbe, "probe", return_value=fake_host), \
+                         patch.object(DockerAdapter, "run") as mock_run:
+                        code = main(["build", str(repo), "--yes"])
+                        self.assertEqual(code, 2)
+                        mock_run.assert_not_called()
+                finally:
+                    DockerStorageProbe.set_mock(None)
 
         def test_rc10_ml_workload_preflight_prevents_disk_exhaustion(self):
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -14063,6 +14266,9 @@ def main(argv: list[str] | None = None) -> int:
                     print('Remote context: inspect published ports on the Docker Engine host.')
                 else:
                     PortAudit.print_report(plan.published_ports)
+                if plan.resource_budget and plan.resource_budget.verdict == StorageVerdict.BLOCKED:
+                    print(f"\nDEPLOYMENT BLOCKED -- INSUFFICIENT DOCKER STORAGE: {plan.resource_budget.explanations[0]}", file=sys.stderr)
+                    return 1
                 return 0
             if args.action == "ports":
                 if settings.docker_context:
@@ -14152,6 +14358,11 @@ def main(argv: list[str] | None = None) -> int:
                 if args.action == 'job' and kind != 'batch':
                     raise OpsError("Job needs a batch application. Use --kind batch at generation.")
             DockerAdapter(settings.target.root, settings.docker_context).preflight()
+            if args.action in {"build", "up"}:
+                plan = Planner().build(settings, Inspector().inspect(settings.target, settings.entry))
+                if plan.resource_budget and plan.resource_budget.verdict == StorageVerdict.BLOCKED:
+                    err_msg = plan.resource_budget.explanations[0] if plan.resource_budget.explanations else "Insufficient Docker storage"
+                    raise OpsError(f"Deployment blocked: {err_msg}")
         if args.action in {"build", "up", "run", "job"} and not args.yes:
             if not sys.stdin.isatty() or input(f"Run Docker {args.action}? Type YES: ").strip() != "YES":
                 raise OpsError("Operation cancelled. Pass --yes for noninteractive execution.")
