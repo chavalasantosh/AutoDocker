@@ -33,3 +33,7 @@ htmlcov/
 # Auto Docker runtime generated directories
 .opsforge/
 .opsforge-backup-*/
+
+# Local showcase assets
+autodocker_*.png
+autodocker_*.jpg
