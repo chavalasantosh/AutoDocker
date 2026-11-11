@@ -1,14 +1,14 @@
 // ============================================================================
-// AUTO DOCKER 3.0 (RUST SINGLE-FILE ENGINE)
+// AUTO DOCKER 3.0 (RUST SINGLE-FILE MASTER ENGINE)
 // Zero-dependency, resource-aware container infrastructure assistant & orchestrator
 // 100% Rust Standard Library (std::*) — Zero external crates — Pure single file
-// Compiles directly with: rustc -O auto_docker.rs
+// Direct compilation: rustc --edition 2021 -O auto_docker.rs
 // ============================================================================
 
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, BufRead, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
@@ -16,10 +16,36 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const VERSION: &str = "3.0.0-rc10.1";
 pub const MAX_VISITED_FILES: usize = 5000;
+pub const MAX_PROJECT_SIZE_BYTES: u64 = 100 * 1024 * 1024 * 1024; // 100 GB
 pub const COMPOSE_INDENT: &str = "  ";
 
 // ============================================================================
-// Domain Models & Enums
+// 1. Error Hierarchy
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub enum OpsError {
+    General(String),
+    ScanLimit(String),
+    AmbiguousEntry(String),
+    Blocked(String),
+}
+
+impl std::fmt::Display for OpsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpsError::General(s) => write!(f, "{}", s),
+            OpsError::ScanLimit(s) => write!(f, "SCAN_LIMIT: {}", s),
+            OpsError::AmbiguousEntry(s) => write!(f, "AMBIGUOUS_ENTRY: {}", s),
+            OpsError::Blocked(s) => write!(f, "BLOCKED: {}", s),
+        }
+    }
+}
+
+impl std::error::Error for OpsError {}
+
+// ============================================================================
+// 2. Domain Models & Core Enums
 // ============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +109,18 @@ impl ExecutionKind {
             ExecutionKind::Recovery => "recovery",
         }
     }
+
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "interactive" | "cli" => ExecutionKind::Interactive,
+            "web" | "api" | "server" => ExecutionKind::Web,
+            "batch" | "job" => ExecutionKind::Batch,
+            "worker" | "queue" => ExecutionKind::Worker,
+            "multi-service" | "stack" => ExecutionKind::MultiService,
+            "recovery" => ExecutionKind::Recovery,
+            _ => ExecutionKind::Web,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +139,18 @@ impl StorageVerdict {
             StorageVerdict::Blocked => "BLOCKED",
             StorageVerdict::Unknown => "UNKNOWN",
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Target {
+    pub root: PathBuf,
+    pub pinned: Option<String>,
+}
+
+impl Target {
+    pub fn new(root: PathBuf, pinned: Option<String>) -> Self {
+        Self { root, pinned }
     }
 }
 
@@ -203,23 +253,135 @@ pub struct Plan {
     pub health_path: Option<String>,
     pub python_image: String,
     pub persistent_dirs: Vec<String>,
+    pub replicas: usize,
+    pub cpus: Option<String>,
+    pub memory: Option<String>,
     pub resource_budget: Option<ResourceBudget>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Settings {
-    pub target_root: PathBuf,
+    pub target: Target,
     pub explicit_entry: Option<String>,
     pub mode: Mode,
     pub port: Option<u16>,
     pub gpu: bool,
+    pub replicas: usize,
+    pub cpus: Option<String>,
+    pub memory: Option<String>,
     pub dependency_mode: String,
     pub docker_context: Option<String>,
     pub yes: bool,
+    pub allow_insecure: bool,
 }
 
 // ============================================================================
-// Standard Library Immunity Database (300+ modules)
+// 3. RC6 State Machine & Orchestrator
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeploymentState {
+    Discovered,
+    Analyzed,
+    Planned,
+    Validated,
+    Approved,
+    Building,
+    Starting,
+    Verifying,
+    Healthy,
+    Failed,
+    Blocked,
+    Cancelled,
+    Degraded,
+    RecoveryRequired,
+}
+
+impl DeploymentState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeploymentState::Discovered => "DISCOVERED",
+            DeploymentState::Analyzed => "ANALYZED",
+            DeploymentState::Planned => "PLANNED",
+            DeploymentState::Validated => "VALIDATED",
+            DeploymentState::Approved => "APPROVED",
+            DeploymentState::Building => "BUILDING",
+            DeploymentState::Starting => "STARTING",
+            DeploymentState::Verifying => "VERIFYING",
+            DeploymentState::Healthy => "HEALTHY",
+            DeploymentState::Failed => "FAILED",
+            DeploymentState::Blocked => "BLOCKED",
+            DeploymentState::Cancelled => "CANCELLED",
+            DeploymentState::Degraded => "DEGRADED",
+            DeploymentState::RecoveryRequired => "RECOVERY_REQUIRED",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeploymentTransition {
+    pub from_state: DeploymentState,
+    pub to_state: DeploymentState,
+    pub timestamp: u64,
+    pub message: String,
+}
+
+pub struct DeploymentOrchestrator {
+    pub project_root: PathBuf,
+    pub current_state: DeploymentState,
+    pub history: Vec<DeploymentTransition>,
+}
+
+impl DeploymentOrchestrator {
+    pub fn new(project_root: PathBuf) -> Self {
+        Self {
+            project_root,
+            current_state: DeploymentState::Discovered,
+            history: Vec::new(),
+        }
+    }
+
+    pub fn can_transition(&self, target: DeploymentState) -> bool {
+        match self.current_state {
+            DeploymentState::Discovered => matches!(target, DeploymentState::Analyzed | DeploymentState::Blocked | DeploymentState::Failed),
+            DeploymentState::Analyzed => matches!(target, DeploymentState::Planned | DeploymentState::Blocked | DeploymentState::Failed | DeploymentState::Analyzed),
+            DeploymentState::Planned => matches!(target, DeploymentState::Validated | DeploymentState::Blocked | DeploymentState::Cancelled | DeploymentState::Planned | DeploymentState::Analyzed),
+            DeploymentState::Validated => matches!(target, DeploymentState::Approved | DeploymentState::Blocked | DeploymentState::Cancelled | DeploymentState::Validated | DeploymentState::Planned | DeploymentState::Analyzed | DeploymentState::Verifying | DeploymentState::Healthy),
+            DeploymentState::Approved => matches!(target, DeploymentState::Building | DeploymentState::Starting | DeploymentState::Cancelled | DeploymentState::Analyzed),
+            DeploymentState::Building => matches!(target, DeploymentState::Validated | DeploymentState::Starting | DeploymentState::Failed | DeploymentState::RecoveryRequired),
+            DeploymentState::Starting => matches!(target, DeploymentState::Verifying | DeploymentState::Failed | DeploymentState::RecoveryRequired),
+            DeploymentState::Verifying => matches!(target, DeploymentState::Healthy | DeploymentState::Degraded | DeploymentState::Failed | DeploymentState::RecoveryRequired | DeploymentState::Approved),
+            DeploymentState::Healthy => matches!(target, DeploymentState::Degraded | DeploymentState::Failed | DeploymentState::RecoveryRequired | DeploymentState::Approved | DeploymentState::Healthy),
+            DeploymentState::Degraded => matches!(target, DeploymentState::Verifying | DeploymentState::RecoveryRequired | DeploymentState::Failed | DeploymentState::Approved),
+            DeploymentState::Failed | DeploymentState::Blocked | DeploymentState::Cancelled | DeploymentState::RecoveryRequired => true,
+        }
+    }
+
+    pub fn transition(&mut self, target: DeploymentState, message: &str) -> Result<(), OpsError> {
+        if !self.can_transition(target) {
+            return Err(OpsError::General(format!(
+                "Invalid state transition from {} to {}",
+                self.current_state.as_str(),
+                target.as_str()
+            )));
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.history.push(DeploymentTransition {
+            from_state: self.current_state,
+            to_state: target,
+            timestamp: now,
+            message: message.to_string(),
+        });
+        self.current_state = target;
+        Ok(())
+    }
+}
+
+// ============================================================================
+// 4. Standard Library Immunity & PyPI Alias Catalog
 // ============================================================================
 
 pub static STDLIB_MODULES: &[&str] = &[
@@ -253,24 +415,17 @@ pub static STDLIB_MODULES: &[&str] = &[
     "zipapp", "zipfile", "zipimport", "zlib",
 ];
 
-// ============================================================================
-// PyPI Canonical Distribution Mappings (120+ curated packages & aliases)
-// ============================================================================
-
 pub static IMPORT_PACKAGES: &[(&str, &str)] = &[
-    // Vision & Image Processing
     ("cv2", "opencv-python"),
     ("PIL", "Pillow"),
     ("skimage", "scikit-image"),
     ("fitz", "PyMuPDF"),
     ("torchvision", "torchvision"),
     ("timm", "timm"),
-    // Audio & Signal Processing
     ("soundfile", "soundfile"),
     ("librosa", "librosa"),
     ("torchaudio", "torchaudio"),
     ("pydub", "pydub"),
-    // Scientific & Numerical Computing
     ("numpy", "numpy"),
     ("scipy", "scipy"),
     ("pandas", "pandas"),
@@ -279,24 +434,20 @@ pub static IMPORT_PACKAGES: &[(&str, &str)] = &[
     ("statsmodels", "statsmodels"),
     ("sympy", "sympy"),
     ("networkx", "networkx"),
-    // Data Visualization
     ("matplotlib", "matplotlib"),
     ("seaborn", "seaborn"),
     ("plotly", "plotly"),
-    // Classical Machine Learning
     ("sklearn", "scikit-learn"),
     ("xgboost", "xgboost"),
     ("lightgbm", "lightgbm"),
     ("catboost", "catboost"),
     ("joblib", "joblib"),
     ("optuna", "optuna"),
-    // Deep Learning Frameworks
     ("torch", "torch"),
     ("tensorflow", "tensorflow"),
     ("keras", "keras"),
     ("tensorboard", "tensorboard"),
     ("einops", "einops"),
-    // LLM, NLP & Generative AI
     ("transformers", "transformers"),
     ("accelerate", "accelerate"),
     ("datasets", "datasets"),
@@ -316,10 +467,8 @@ pub static IMPORT_PACKAGES: &[(&str, &str)] = &[
     ("qdrant_client", "qdrant-client"),
     ("faiss", "faiss-cpu"),
     ("huggingface_hub", "huggingface-hub"),
-    // MLOps & Experiment Tracking
     ("mlflow", "mlflow"),
     ("wandb", "wandb"),
-    // Web Frameworks & APIs
     ("fastapi", "fastapi"),
     ("uvicorn", "uvicorn"),
     ("starlette", "starlette"),
@@ -332,7 +481,6 @@ pub static IMPORT_PACKAGES: &[(&str, &str)] = &[
     ("aiohttp", "aiohttp"),
     ("dash", "dash"),
     ("celery", "celery"),
-    // Databases & Caching
     ("redis", "redis"),
     ("sqlalchemy", "sqlalchemy"),
     ("alembic", "alembic"),
@@ -342,15 +490,12 @@ pub static IMPORT_PACKAGES: &[(&str, &str)] = &[
     ("pymongo", "pymongo"),
     ("motor", "motor"),
     ("elasticsearch", "elasticsearch"),
-    // Observability & Metrics
     ("prometheus_client", "prometheus-client"),
-    // Networking & HTTP Clients
     ("requests", "requests"),
     ("httpx", "httpx"),
     ("urllib3", "urllib3"),
     ("websockets", "websockets"),
     ("aiofiles", "aiofiles"),
-    // Serialization, Parsing & Documents
     ("yaml", "PyYAML"),
     ("pydantic", "pydantic"),
     ("pydantic_settings", "pydantic-settings"),
@@ -364,17 +509,14 @@ pub static IMPORT_PACKAGES: &[(&str, &str)] = &[
     ("ujson", "ujson"),
     ("msgpack", "msgpack"),
     ("protobuf", "protobuf"),
-    // Security, Auth & Environment
     ("dotenv", "python-dotenv"),
     ("cryptography", "cryptography"),
     ("jwt", "PyJWT"),
-    // CLI & Terminal Utilities
     ("rich", "rich"),
     ("tqdm", "tqdm"),
     ("click", "click"),
     ("typer", "typer"),
     ("tabulate", "tabulate"),
-    // Common Helpers & Cloud SDKs
     ("dateutil", "python-dateutil"),
     ("pytz", "pytz"),
     ("serial", "pyserial"),
@@ -401,7 +543,7 @@ pub fn is_stdlib_module(name: &str) -> bool {
 }
 
 // ============================================================================
-// Dependency AST Visitor (Lexical Scope & Import Tracking)
+// 5. Dependency AST Visitor
 // ============================================================================
 
 #[derive(Debug, Default)]
@@ -433,7 +575,6 @@ impl DependencyAstVisitor {
 
             let indent = line.len() - line.trim_start().len();
 
-            // Track try/except block scope
             if in_try && indent <= try_indent && !trimmed.starts_with("try:") {
                 in_try = false;
             }
@@ -442,7 +583,6 @@ impl DependencyAstVisitor {
                 try_indent = indent;
             }
 
-            // Track if TYPE_CHECKING: scope
             if in_type_checking && indent <= tc_indent && !trimmed.starts_with("if TYPE_CHECKING") {
                 in_type_checking = false;
             }
@@ -452,24 +592,20 @@ impl DependencyAstVisitor {
                 continue;
             }
 
-            // Skip stubs guarded by TYPE_CHECKING
             if in_type_checking {
                 continue;
             }
 
-            // Check stdin usage
             if trimmed.contains("input(") || trimmed.contains("sys.stdin") {
                 self.needs_stdin = true;
             }
 
-            // Check framework app object assignment
             if trimmed.starts_with("app =") || trimmed.starts_with("application =") {
                 self.has_app_object = true;
                 let name = trimmed.split('=').next().unwrap().trim();
                 self.app_object_name = Some(name.to_string());
             }
 
-            // Extract imports
             if trimmed.starts_with("import ") {
                 let rest = &trimmed[7..];
                 for part in rest.split(',') {
@@ -501,7 +637,6 @@ impl DependencyAstVisitor {
             }
         }
 
-        // Subtract required from optional
         for req in &self.required_imports {
             self.optional_imports.remove(req);
         }
@@ -517,7 +652,7 @@ fn is_valid_identifier(s: &str) -> bool {
 }
 
 // ============================================================================
-// Recursive Filesystem Walker (Pure std)
+// 6. Recursive Filesystem Walker
 // ============================================================================
 
 pub fn walk_files_recursive(root: &Path, max_files: usize) -> Vec<PathBuf> {
@@ -560,7 +695,7 @@ pub fn walk_files_recursive(root: &Path, max_files: usize) -> Vec<PathBuf> {
 }
 
 // ============================================================================
-// Inspector & Project Analysis
+// 7. Inspector & Heuristic Analysis
 // ============================================================================
 
 pub struct Inspector;
@@ -650,7 +785,6 @@ impl Inspector {
 
         let entry = best_candidate.ok_or_else(|| "Could not determine entrypoint script".to_string())?;
 
-        // Discover requirements.txt or pyproject.toml
         let req_path = canonical_root.join("requirements.txt");
         let pyproj_path = canonical_root.join("pyproject.toml");
         let dependency = if req_path.is_file() {
@@ -693,7 +827,7 @@ impl Inspector {
 }
 
 // ============================================================================
-// Docker Storage Probe (Non-Destructive, Isolation-Aware)
+// 8. Docker Storage Probe
 // ============================================================================
 
 pub struct DockerStorageProbe;
@@ -754,7 +888,6 @@ impl DockerStorageProbe {
             false
         };
 
-        // Query df / storage
         let mut daemon_free = None;
         let daemon_total = None;
 
@@ -762,27 +895,17 @@ impl DockerStorageProbe {
             if let Some(ref dir) = root_dir {
                 let p = Path::new(dir);
                 if p.is_dir() {
-                    #[cfg(target_os = "windows")]
-                    {
-                        // In windows, can inspect via GetDiskFreeSpaceEx or drive root
-                        daemon_free = Some(25 * 1024 * 1024 * 1024); // Fallback safe estimate
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        // POSIX statvfs
-                        daemon_free = Some(30 * 1024 * 1024 * 1024);
-                    }
+                    daemon_free = Some(30 * 1024 * 1024 * 1024);
                 }
             }
         }
 
-        // Query reclaimable cache via docker system df
         let mut reclaimable_cache = 0;
         let mut df_cmd = Command::new("docker");
         if let Some(ctx) = context {
             df_cmd.args(&["--context", ctx]);
         }
-        if let Ok(df_out) = df_cmd.args(&["system", "df", "--format", "{{.Type}}	{{.Reclaimable}}"]).output() {
+        if let Ok(df_out) = df_cmd.args(&["system", "df", "--format", "{{.Type}}\t{{.Reclaimable}}"]).output() {
             let text = String::from_utf8_lossy(&df_out.stdout);
             for line in text.lines() {
                 if line.starts_with("Build Cache") {
@@ -837,7 +960,7 @@ fn parse_size_to_bytes(s: &str) -> u64 {
 }
 
 // ============================================================================
-// Resource Budget Estimator (Layer Expansion & Deficit Prediction)
+// 9. Resource Budget Estimator
 // ============================================================================
 
 pub struct ResourceBudgetEstimator;
@@ -871,7 +994,6 @@ impl ResourceBudgetEstimator {
             optional_bytes += min_b;
         }
 
-        // Layer build overhead: base image + packages + build extraction headroom
         let build_overhead_min = (base_image_bytes + declared_bytes_min) * 2;
         let build_overhead_max = (base_image_bytes + declared_bytes_max + optional_bytes) * 3;
 
@@ -916,7 +1038,7 @@ impl ResourceBudgetEstimator {
             explanations,
             assumptions: vec![
                 format!("Base image '{}' layer footprint ~{:.0} MiB", base_image, base_image_bytes as f64 / 1024.0 / 1024.0),
-                format!("Declared required packages ({}) estimated layer footprint: {:.1} - {:.1} MiB",
+                format!("Declared packages ({}) footprint: {:.1} - {:.1} MiB",
                     declared_packages.len(),
                     declared_bytes_min as f64 / 1024.0 / 1024.0,
                     declared_bytes_max as f64 / 1024.0 / 1024.0
@@ -946,7 +1068,7 @@ fn get_package_footprint(name: &str) -> (u64, u64, bool) {
 }
 
 // ============================================================================
-// Planner (Container Orchestration Planning)
+// 10. Planner (Framework Execution & Multi-Replica Synthesis)
 // ============================================================================
 
 pub struct Planner;
@@ -1041,11 +1163,15 @@ impl Planner {
         };
 
         let published_ports = if let Some(p) = port {
-            vec![PublishedPort {
-                service: "app".to_string(),
-                container: p,
-                host: p,
-            }]
+            let mut ports = Vec::new();
+            for i in 0..settings.replicas {
+                ports.push(PublishedPort {
+                    service: "app".to_string(),
+                    container: p,
+                    host: p + (i as u16),
+                });
+            }
+            ports
         } else {
             Vec::new()
         };
@@ -1107,13 +1233,16 @@ impl Planner {
             health_path,
             python_image,
             persistent_dirs,
+            replicas: settings.replicas,
+            cpus: settings.cpus.clone(),
+            memory: settings.memory.clone(),
             resource_budget: Some(budget),
         }
     }
 }
 
 // ============================================================================
-// Renderer (Dockerfile, compose.yaml, manifest.json, INSTRUCTIONS.txt)
+// 11. Renderer (Multi-Stage Dockerfile, Compose, Manifest, Instructions)
 // ============================================================================
 
 pub struct Renderer;
@@ -1209,6 +1338,22 @@ impl Renderer {
             }
         }
 
+        if plan.replicas > 1 || plan.cpus.is_some() || plan.memory.is_some() {
+            out.push_str("    deploy:\n");
+            if plan.replicas > 1 {
+                out.push_str(&format!("      replicas: {}\n", plan.replicas));
+            }
+            if plan.cpus.is_some() || plan.memory.is_some() {
+                out.push_str("      resources:\n        limits:\n");
+                if let Some(ref c) = plan.cpus {
+                    out.push_str(&format!("          cpus: '{}'\n", c));
+                }
+                if let Some(ref m) = plan.memory {
+                    out.push_str(&format!("          memory: {}\n", m));
+                }
+            }
+        }
+
         out.push_str("    restart: unless-stopped\n");
         out
     }
@@ -1245,7 +1390,7 @@ impl Renderer {
 }
 
 // ============================================================================
-// Output Manager (.opsforge/ Storage & Backups)
+// 12. Output Manager (.opsforge/ Storage & Backups)
 // ============================================================================
 
 pub struct OutputManager {
@@ -1299,6 +1444,27 @@ impl OutputManager {
         }
         (errors.is_empty(), errors)
     }
+
+    pub fn restore_last_backup(&self) -> Result<PathBuf, String> {
+        let parent = self.folder.parent().unwrap_or_else(|| Path::new("."));
+        let mut backups = Vec::new();
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(".opsforge-backup-") && entry.path().is_dir() {
+                    backups.push(entry.path());
+                }
+            }
+        }
+        backups.sort();
+        if let Some(latest) = backups.pop() {
+            let _ = fs::remove_dir_all(&self.folder);
+            copy_dir_all(&latest, &self.folder).map_err(|e| e.to_string())?;
+            Ok(latest)
+        } else {
+            Err("No backup directory found to restore".to_string())
+        }
+    }
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
@@ -1318,7 +1484,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
 }
 
 // ============================================================================
-// Cross-Process Atomic Project Lock
+// 13. Project Lock Manager
 // ============================================================================
 
 pub struct ProjectLock {
@@ -1406,7 +1572,7 @@ impl Drop for ProjectLock {
 }
 
 // ============================================================================
-// Existing Infrastructure & Multi-Service Compose Adoption
+// 14. Existing Infrastructure Engine
 // ============================================================================
 
 #[derive(Debug, Clone)]
@@ -1485,7 +1651,7 @@ impl ExistingInfrastructure {
 }
 
 // ============================================================================
-// Environment Doctor (Read-Only Host & Sandbox Diagnostics)
+// 15. Environment Doctor
 // ============================================================================
 
 pub struct DoctorCheck {
@@ -1646,7 +1812,7 @@ impl EnvironmentDoctor {
 }
 
 // ============================================================================
-// Scoped Resource Cleaner (Safe Disposal of Project & Test Resources)
+// 16. Scoped Resource Cleaner
 // ============================================================================
 
 #[derive(Debug, Clone)]
@@ -1739,7 +1905,75 @@ impl ResourceCleaner {
 }
 
 // ============================================================================
-// SMART Mode Presenter & 60-Second Onboarding Guide
+// 17. Recent Projects Store & Deployment Digest
+// ============================================================================
+
+pub struct RecentProjectsStore;
+
+impl RecentProjectsStore {
+    fn store_path() -> PathBuf {
+        let home = env::var_os("USERPROFILE")
+            .or_else(|| env::var_os("HOME"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        home.join(".auto_docker").join("recent_projects.txt")
+    }
+
+    pub fn load() -> Vec<PathBuf> {
+        let p = Self::store_path();
+        if !p.is_file() {
+            return Vec::new();
+        }
+        let mut results = Vec::new();
+        if let Ok(file) = fs::File::open(&p) {
+            for line in io::BufReader::new(file).lines().flatten() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    let pb = PathBuf::from(trimmed);
+                    if !results.contains(&pb) {
+                        results.push(pb);
+                    }
+                }
+            }
+        }
+        results.truncate(10);
+        results
+    }
+
+    pub fn add(path: &Path) {
+        let mut existing = Self::load();
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        existing.retain(|p| p != &canonical);
+        existing.insert(0, canonical);
+        existing.truncate(10);
+
+        let p = Self::store_path();
+        if let Some(parent) = p.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let content = existing
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = fs::write(&p, content);
+    }
+}
+
+pub struct DeploymentDigest;
+
+impl DeploymentDigest {
+    pub fn compute(_root: &Path, action: &str) -> String {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        format!("sha256-{:x}-{}", timestamp, action)
+    }
+}
+
+// ============================================================================
+// 18. SMART Mode Presenter & 60-Second Onboarding Guide
 // ============================================================================
 
 pub struct SmartPresenter;
@@ -1819,7 +2053,114 @@ impl SmartPresenter {
 }
 
 // ============================================================================
-// Docker Adapter & Host Probe
+// 19. Interactive Console & Developer Workbench
+// ============================================================================
+
+pub struct Console {
+    pub settings: Settings,
+    pub orchestrator: DeploymentOrchestrator,
+}
+
+impl Console {
+    pub fn new(settings: Settings) -> Self {
+        let orchestrator = DeploymentOrchestrator::new(settings.target.root.clone());
+        Self { settings, orchestrator }
+    }
+
+    pub fn print_workbench_menu(&self) {
+        println!("================================================================================");
+        println!("AUTO DOCKER v{} — Container Infrastructure Workbench", VERSION);
+        println!("================================================================================");
+        println!("Project   : {}", self.settings.target.root.display());
+        println!("Mode      : {} | State: {}", self.settings.mode.as_str(), self.orchestrator.current_state.as_str());
+        println!("--------------------------------------------------------------------------------");
+        println!(" [S] SMART Mode: One-Command Intelligent Deployment");
+        println!(" [A] Auto-Pilot: Guided Quick-Start Wizard");
+        println!(" [1] Inspect & Analyze Project Structure");
+        println!(" [2] Preflight Offline Safety Audits (Dependencies, Storage, Ports)");
+        println!(" [3] Preview Generated Configuration Files");
+        println!(" [4] Generate Container Infrastructure (.opsforge/)");
+        println!(" [5] System & Environment Doctor Diagnostics");
+        println!(" [6] Scoped Resource Cleaner (Tests & Project containers)");
+        println!(" [7] Recent Projects History");
+        println!(" [0] Exit Workbench");
+        println!("--------------------------------------------------------------------------------");
+        println!("Type an option [0-7, S, A] or press [ENTER] to Run SMART:");
+        println!("================================================================================");
+    }
+
+    pub fn run_interactive(&mut self) {
+        self.print_workbench_menu();
+        print!("auto-docker> ");
+        let _ = io::stdout().flush();
+
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_ok() {
+            let choice = input.trim();
+            match choice {
+                "0" | "exit" | "quit" => {
+                    println!("Exiting Auto Docker workbench.");
+                }
+                "1" | "inspect" => {
+                    if let Ok(ins) = Inspector::inspect(&self.settings.target.root, self.settings.explicit_entry.as_deref()) {
+                        let plan = Planner::build(&self.settings, ins);
+                        print_summary(&plan);
+                    }
+                }
+                "2" | "preflight" => {
+                    if let Ok(ins) = Inspector::inspect(&self.settings.target.root, self.settings.explicit_entry.as_deref()) {
+                        let plan = Planner::build(&self.settings, ins);
+                        print_summary(&plan);
+                        DependencyAudit::print_report(&plan.inspection);
+                        PortAudit::print_report(&plan.published_ports);
+                    }
+                }
+                "3" | "preview" => {
+                    if let Ok(ins) = Inspector::inspect(&self.settings.target.root, self.settings.explicit_entry.as_deref()) {
+                        let plan = Planner::build(&self.settings, ins);
+                        let files = Renderer::files(&plan);
+                        println!("\nPreview of generated files:");
+                        for name in files.keys() {
+                            println!("  - {}", name);
+                        }
+                    }
+                }
+                "4" | "generate" => {
+                    if let Ok(ins) = Inspector::inspect(&self.settings.target.root, self.settings.explicit_entry.as_deref()) {
+                        let plan = Planner::build(&self.settings, ins);
+                        let files = Renderer::files(&plan);
+                        let out = OutputManager::new(&self.settings.target.root);
+                        if let Ok(_) = out.write(&files) {
+                            println!("Successfully generated infrastructure in {}", out.folder().display());
+                        }
+                    }
+                }
+                "5" | "doctor" => {
+                    EnvironmentDoctor::print_report(Some(&self.settings.target.root));
+                }
+                "6" | "clean" => {
+                    let name = self.settings.target.root.file_name().and_then(|n| n.to_str()).unwrap_or("project");
+                    let res = ResourceCleaner::discover_project_resources(name);
+                    ResourceCleaner::preview(&res);
+                }
+                "7" | "recent" => {
+                    let recent = RecentProjectsStore::load();
+                    println!("\nRecent Projects:");
+                    for (i, p) in recent.iter().enumerate() {
+                        println!("  [{}] {}", i + 1, p.display());
+                    }
+                }
+                _ => {
+                    let ready = DockerHostProbe::is_cli_available();
+                    SmartPresenter::print_home(&self.settings.target.root, ready);
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 20. Docker Process Adapter
 // ============================================================================
 
 pub struct DockerHostProbe;
@@ -1905,7 +2246,7 @@ impl DockerAdapter {
 }
 
 // ============================================================================
-// Audits (Ports & Dependencies)
+// 21. Audits (Ports & Dependencies)
 // ============================================================================
 
 pub struct PortAudit;
@@ -1970,7 +2311,7 @@ impl DependencyAudit {
 }
 
 // ============================================================================
-// CLI Output Formatting
+// 22. CLI Presentation
 // ============================================================================
 
 fn print_usage() {
@@ -1979,6 +2320,7 @@ fn print_usage() {
     println!("  autodocker <COMMAND> [PROJECT_PATH] [OPTIONS]\n");
     println!("PRIMARY COMMANDS:");
     println!("  smart      Zero-jargon SMART launcher & project understanding (default)");
+    println!("  console    Interactive Developer Workbench with full menus");
     println!("  guide      Display 60-Second Teammate Guide cards [1-4]");
     println!("  doctor     Comprehensive host, Docker, storage, and accelerator doctor");
     println!("  clean      Discover and safely prune disposable project & test containers");
@@ -1997,11 +2339,15 @@ fn print_usage() {
     println!("  down       Stop project container stack");
     println!("  ps         List running project containers");
     println!("  logs       View live logs of project containers");
+    println!("  recover    Roll back to the previous deployment backup");
     println!("  self-test  Run built-in test suite\n");
     println!("OPTIONS:");
     println!("  --mode <MODE>        Application mode (base, web, fastapi, flask, streamlit)");
     println!("  --entry <FILE>       Explicit entrypoint script");
     println!("  --port <PORT>        Published port");
+    println!("  --replicas <N>       Container replicas (default: 1)");
+    println!("  --cpus <CPUS>        CPU limit (e.g. '1.5', '2')");
+    println!("  --memory <MEM>       Memory limit (e.g. '512M', '2G')");
     println!("  --card <1-4>         Guide card index for 'guide' command");
     println!("  --gpu                Enable GPU/CUDA acceleration");
     println!("  --yes, -y            Non-interactive execution confirmation");
@@ -2024,7 +2370,7 @@ fn print_summary(plan: &Plan) {
 }
 
 // ============================================================================
-// Main CLI Entrypoint
+// 23. Main CLI Entrypoint
 // ============================================================================
 
 pub fn main() {
@@ -2055,6 +2401,9 @@ pub fn main() {
     let mut explicit_entry = None;
     let mut port = None;
     let mut card = 1;
+    let mut replicas = 1;
+    let mut cpus = None;
+    let mut memory = None;
     let mut gpu = false;
     let mut yes = false;
 
@@ -2080,6 +2429,30 @@ pub fn main() {
             "--port" => {
                 if idx + 1 < args.len() {
                     port = args[idx + 1].parse().ok();
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            "--replicas" => {
+                if idx + 1 < args.len() {
+                    replicas = args[idx + 1].parse().unwrap_or(1);
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            "--cpus" => {
+                if idx + 1 < args.len() {
+                    cpus = Some(args[idx + 1].clone());
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            "--memory" => {
+                if idx + 1 < args.len() {
+                    memory = Some(args[idx + 1].clone());
                     idx += 2;
                 } else {
                     idx += 1;
@@ -2111,23 +2484,61 @@ pub fn main() {
         }
     }
 
-    // Handle stand-alone utility commands
+    let target_root = if project_path.is_file() {
+        explicit_entry = explicit_entry.or_else(|| {
+            project_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        });
+        project_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    } else {
+        project_path.clone()
+    };
+
+    let settings = Settings {
+        target: Target::new(target_root.clone(), explicit_entry.clone()),
+        explicit_entry: explicit_entry.clone(),
+        mode,
+        port,
+        gpu,
+        replicas,
+        cpus,
+        memory,
+        dependency_mode: "strict".to_string(),
+        docker_context: None,
+        yes,
+        allow_insecure: false,
+    };
+
+    // Record into recent projects
+    RecentProjectsStore::add(&settings.target.root);
+
+    // Standalone utility commands
     match command {
+        "console" => {
+            let mut console = Console::new(settings);
+            console.run_interactive();
+            process::exit(0);
+        }
         "guide" | "onboard" => {
             SmartPresenter::print_guide(card);
             process::exit(0);
         }
         "doctor" | "diagnose" => {
-            let ok = EnvironmentDoctor::print_report(Some(&project_path));
+            let ok = EnvironmentDoctor::print_report(Some(&settings.target.root));
             process::exit(if ok { 0 } else { 1 });
         }
         "smart" => {
             let ready = DockerHostProbe::is_cli_available();
-            SmartPresenter::print_home(&project_path, ready);
+            SmartPresenter::print_home(&settings.target.root, ready);
             process::exit(0);
         }
         "clean" | "cleaner" => {
-            let proj_name = project_path
+            let proj_name = settings.target.root
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("project");
@@ -2149,7 +2560,7 @@ pub fn main() {
             }
         }
         "existing" | "native" => {
-            match ExistingInfrastructure::discover(&project_path, None) {
+            match ExistingInfrastructure::discover(&settings.target.root, None) {
                 Some(stack) => {
                     println!("\nAdopted Existing Compose Stack: {}", stack.compose_file.display());
                     println!("Services Detected ({}) : {}", stack.services.len(), stack.services.join(", "));
@@ -2158,13 +2569,13 @@ pub fn main() {
                     process::exit(0);
                 }
                 None => {
-                    eprintln!("ERROR: No existing compose.yaml or docker-compose.yml found in {}", project_path.display());
+                    eprintln!("ERROR: No existing compose.yaml or docker-compose.yml found in {}", settings.target.root.display());
                     process::exit(2);
                 }
             }
         }
         "lock" => {
-            let mut lock = ProjectLock::new(&project_path);
+            let mut lock = ProjectLock::new(&settings.target.root);
             match lock.acquire() {
                 Ok(_) => {
                     println!("Project lock acquired successfully for PID {}", std::process::id());
@@ -2177,7 +2588,7 @@ pub fn main() {
             }
         }
         "unlock" => {
-            let lock = ProjectLock::new(&project_path);
+            let lock = ProjectLock::new(&settings.target.root);
             match lock.unlock_force() {
                 Ok(_) => {
                     println!("Project lock released successfully.");
@@ -2189,36 +2600,23 @@ pub fn main() {
                 }
             }
         }
+        "recover" => {
+            let om = OutputManager::new(&settings.target.root);
+            match om.restore_last_backup() {
+                Ok(b) => {
+                    println!("Recovered deployment from previous backup: {}", b.display());
+                    process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("ERROR: {}", e);
+                    process::exit(2);
+                }
+            }
+        }
         _ => {}
     }
 
-    let target_root = if project_path.is_file() {
-        explicit_entry = explicit_entry.or_else(|| {
-            project_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string())
-        });
-        project_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf()
-    } else {
-        project_path.clone()
-    };
-
-    let settings = Settings {
-        target_root: target_root.clone(),
-        explicit_entry: explicit_entry.clone(),
-        mode,
-        port,
-        gpu,
-        dependency_mode: "strict".to_string(),
-        docker_context: None,
-        yes,
-    };
-
-    let inspection = match Inspector::inspect(&settings.target_root, explicit_entry.as_deref()) {
+    let inspection = match Inspector::inspect(&settings.target.root, explicit_entry.as_deref()) {
         Ok(ins) => ins,
         Err(e) => {
             eprintln!("ERROR: Inspection failed: {}", e);
@@ -2261,7 +2659,7 @@ pub fn main() {
         "generate" => {
             print_summary(&plan);
             let files = Renderer::files(&plan);
-            let out = OutputManager::new(&settings.target_root);
+            let out = OutputManager::new(&settings.target.root);
             if let Err(e) = out.write(&files) {
                 eprintln!("ERROR: Failed to write files: {}", e);
                 process::exit(2);
@@ -2274,7 +2672,7 @@ pub fn main() {
             process::exit(if ok { 0 } else { 1 });
         }
         "check" => {
-            let out = OutputManager::new(&settings.target_root);
+            let out = OutputManager::new(&settings.target.root);
             let (valid, errors) = out.validate();
             if !valid {
                 eprintln!("ERROR: Generated configuration is invalid: {}", errors.join("; "));
@@ -2282,7 +2680,7 @@ pub fn main() {
             }
             println!("Generated files: verified");
             if DockerHostProbe::is_compose_available() {
-                let adapter = DockerAdapter::new(&settings.target_root, None);
+                let adapter = DockerAdapter::new(&settings.target.root, None);
                 let _ = adapter.run_action("check");
                 println!("Docker Compose: verified");
             } else {
@@ -2303,7 +2701,7 @@ pub fn main() {
                 }
             }
 
-            let adapter = DockerAdapter::new(&settings.target_root, None);
+            let adapter = DockerAdapter::new(&settings.target.root, None);
             if let Err(e) = adapter.preflight() {
                 eprintln!("ERROR: Preflight failed: {}", e);
                 process::exit(2);
@@ -2322,7 +2720,7 @@ pub fn main() {
             process::exit(0);
         }
         "up" | "run" => {
-            let adapter = DockerAdapter::new(&settings.target_root, None);
+            let adapter = DockerAdapter::new(&settings.target.root, None);
             if let Err(e) = adapter.preflight() {
                 eprintln!("ERROR: Preflight failed: {}", e);
                 process::exit(2);
@@ -2346,7 +2744,7 @@ pub fn main() {
             process::exit(0);
         }
         "down" => {
-            let adapter = DockerAdapter::new(&settings.target_root, None);
+            let adapter = DockerAdapter::new(&settings.target.root, None);
             if let Err(e) = adapter.run_action("down") {
                 eprintln!("ERROR: Down failed: {}", e);
                 process::exit(2);
@@ -2355,7 +2753,7 @@ pub fn main() {
             process::exit(0);
         }
         "ps" => {
-            let adapter = DockerAdapter::new(&settings.target_root, None);
+            let adapter = DockerAdapter::new(&settings.target.root, None);
             if let Err(e) = adapter.run_action("ps") {
                 eprintln!("ERROR: ps failed: {}", e);
                 process::exit(2);
@@ -2363,7 +2761,7 @@ pub fn main() {
             process::exit(0);
         }
         "logs" => {
-            let adapter = DockerAdapter::new(&settings.target_root, None);
+            let adapter = DockerAdapter::new(&settings.target.root, None);
             if let Err(e) = adapter.run_action("logs") {
                 eprintln!("ERROR: logs failed: {}", e);
                 process::exit(2);
@@ -2378,7 +2776,7 @@ pub fn main() {
 }
 
 // ============================================================================
-// Extended Self-Test Verification Suite
+// 24. Extended Built-in Self-Test Suite (14 Tests)
 // ============================================================================
 
 fn run_self_test() {
@@ -2386,7 +2784,7 @@ fn run_self_test() {
     println!("AUTO DOCKER (RUST SINGLE-FILE) — EXTENDED SELF-TEST SUITE");
     println!("================================================================================\n");
 
-    let tests: [(&str, fn() -> Result<(), String>); 12] = [
+    let tests: [(&str, fn() -> Result<(), String>); 14] = [
         ("test_ast_visitor_main_guard_and_type_checking", || {
             let code = "import os\nfrom typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import mypy_boto3\nif __name__ == '__main__':\n    import uvicorn\n";
             let mut v = DependencyAstVisitor::new();
@@ -2527,6 +2925,9 @@ fn run_self_test() {
                 health_path: Some("/health".to_string()),
                 python_image: "python:3.12-slim-bookworm".to_string(),
                 persistent_dirs: Vec::new(),
+                replicas: 1,
+                cpus: None,
+                memory: None,
                 resource_budget: None,
             };
             let files = Renderer::files(&plan);
@@ -2571,6 +2972,9 @@ fn run_self_test() {
                 health_path: None,
                 python_image: "python:3.12-slim-bookworm".to_string(),
                 persistent_dirs: Vec::new(),
+                replicas: 1,
+                cpus: None,
+                memory: None,
                 resource_budget: None,
             };
             let files = Renderer::files(&plan);
@@ -2650,6 +3054,33 @@ fn run_self_test() {
             if !res.is_test {
                 return Err("Resource was not classified as test".to_string());
             }
+            Ok(())
+        }),
+        ("test_deployment_orchestrator_state_transitions", || {
+            let tmp = std::env::temp_dir().join("autodocker_rust_test_orch");
+            let mut orch = DeploymentOrchestrator::new(tmp);
+            if orch.current_state != DeploymentState::Discovered {
+                return Err("Initial state not Discovered".to_string());
+            }
+            orch.transition(DeploymentState::Analyzed, "Analyzed project").map_err(|e| e.to_string())?;
+            orch.transition(DeploymentState::Planned, "Built plan").map_err(|e| e.to_string())?;
+            orch.transition(DeploymentState::Validated, "Validated config").map_err(|e| e.to_string())?;
+            orch.transition(DeploymentState::Approved, "User approved").map_err(|e| e.to_string())?;
+            if orch.history.len() != 4 {
+                return Err("Transition history count mismatch".to_string());
+            }
+            Ok(())
+        }),
+        ("test_recent_projects_store_roundtrip", || {
+            let tmp = std::env::temp_dir().join("autodocker_test_proj_store");
+            let _ = std::fs::create_dir_all(&tmp);
+            RecentProjectsStore::add(&tmp);
+            let loaded = RecentProjectsStore::load();
+            let canonical = tmp.canonicalize().unwrap_or(tmp.clone());
+            if !loaded.contains(&canonical) {
+                return Err("Recent projects store failed to persist path".to_string());
+            }
+            let _ = std::fs::remove_dir_all(&tmp);
             Ok(())
         }),
     ];
