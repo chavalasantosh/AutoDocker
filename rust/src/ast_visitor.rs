@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use rustpython_parser::ast::{self, CmpOp, Expr, Mod, Stmt};
+use rustpython_parser::Mode;
 
 #[derive(Debug, Default, Clone)]
 pub struct DependencyAstVisitor {
@@ -11,148 +13,237 @@ pub struct DependencyAstVisitor {
     pub detected_framework: Option<String>,
 }
 
+#[derive(Default, Clone, Copy)]
+struct AstWalkContext {
+    in_try: bool,
+    in_type_checking: bool,
+    in_main_guard: bool,
+    in_conditional: bool,
+}
+
 impl DependencyAstVisitor {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Parse and analyze Python source code line by line with lexical scope tracking.
+    /// Parse and analyze Python source code using genuine Python AST parsing.
+    /// Falls back to lexical analysis only if syntax is unparsable.
     pub fn parse_source(&mut self, source: &str) {
-        let mut in_main_guard = false;
-        let mut main_guard_indent = 0;
-
-        let mut in_type_checking = false;
-        let mut type_checking_indent = 0;
-
-        let mut in_try = false;
-        let mut try_indent = 0;
-
-        let mut in_conditional_if = false;
-        let mut conditional_if_indent = 0;
-
-        for line in source.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-
-            let indent = line.len() - line.trim_start().len();
-
-            // Check if we exited previously indented blocks
-            if in_main_guard && indent <= main_guard_indent && !trimmed.starts_with("else:") && !trimmed.starts_with("elif ") {
-                in_main_guard = false;
-            }
-            if in_type_checking && indent <= type_checking_indent && !trimmed.starts_with("else:") && !trimmed.starts_with("elif ") {
-                in_type_checking = false;
-            }
-            if in_try && indent <= try_indent && (trimmed.starts_with("except") || trimmed.starts_with("finally:")) {
-                // Keep in_try active during except/finally if still guarded
-            } else if in_try && indent <= try_indent {
-                in_try = false;
-            }
-            if in_conditional_if && indent <= conditional_if_indent && !trimmed.starts_with("else:") && !trimmed.starts_with("elif ") {
-                in_conditional_if = false;
-            }
-
-            // Check for stdin usage
-            if trimmed.contains("input(") || trimmed.contains("sys.stdin.read") || trimmed.contains("sys.stdin.readline") {
-                self.needs_stdin = true;
-            }
-
-            // Check for framework instantiation
-            if trimmed.contains("FastAPI(") {
-                self.detected_framework = Some("fastapi".to_string());
-                self.has_app_object = true;
-                if let Some(var_name) = extract_variable_assignment(trimmed, "FastAPI(") {
-                    self.app_object_name = Some(var_name);
+        if let Ok(parsed) = rustpython_parser::parse(source, Mode::Module, "<source>") {
+            match parsed {
+                Mod::Module(m) => {
+                    let ctx = AstWalkContext::default();
+                    for stmt in &m.body {
+                        self.walk_stmt(stmt, ctx);
+                    }
+                    return;
                 }
-            } else if trimmed.contains("Flask(__name__)") || trimmed.contains("Flask(") {
-                self.detected_framework = Some("flask".to_string());
-                self.has_app_object = true;
-                if let Some(var_name) = extract_variable_assignment(trimmed, "Flask(") {
-                    self.app_object_name = Some(var_name);
-                }
-            } else if trimmed.contains("streamlit") && self.detected_framework.is_none() {
-                self.detected_framework = Some("streamlit".to_string());
-            } else if trimmed.contains("gradio") && self.detected_framework.is_none() {
-                self.detected_framework = Some("gradio".to_string());
+                _ => {}
             }
+        }
+        // Fallback for non-standard / invalid Python code
+        self.parse_source_fallback(source);
+    }
 
-            // Check block beginnings
-            if trimmed.starts_with("if ") {
-                let cond = trimmed.trim_start_matches("if ").trim_end_matches(':').trim();
-                if cond.contains("__name__") && cond.contains("__main__") {
-                    in_main_guard = true;
-                    main_guard_indent = indent;
-                    continue;
-                } else if cond == "TYPE_CHECKING" || cond.contains("typing.TYPE_CHECKING") {
-                    in_type_checking = true;
-                    type_checking_indent = indent;
-                    continue;
-                } else if cond == "True" || cond == "__debug__" {
-                    // Unconditional branch; treated as top-level required
-                    continue;
-                } else {
-                    in_conditional_if = true;
-                    conditional_if_indent = indent;
-                    continue;
-                }
-            }
-
-            if trimmed.starts_with("try:") {
-                in_try = true;
-                try_indent = indent;
-                continue;
-            }
-
-            // Process imports
-            if trimmed.starts_with("import ") {
-                let raw = trimmed.trim_start_matches("import ").trim();
-                for part in raw.split(',') {
-                    let part = part.trim();
-                    let module_full = part.split_whitespace().next().unwrap_or("").trim();
-                    let top_pkg = module_full.split('.').next().unwrap_or("").trim();
+    fn walk_stmt(&mut self, stmt: &Stmt, ctx: AstWalkContext) {
+        match stmt {
+            Stmt::Import(import_stmt) => {
+                for alias in &import_stmt.names {
+                    let top_pkg = alias.name.as_str().split('.').next().unwrap_or("").trim();
                     if is_valid_identifier(top_pkg) {
-                        self.record_import(top_pkg, in_type_checking, in_try, in_conditional_if, in_main_guard);
+                        self.record_import(top_pkg, ctx);
                     }
                 }
-            } else if trimmed.starts_with("from ") {
-                let raw = trimmed.trim_start_matches("from ").trim();
-                if let Some(idx) = raw.find(" import ") {
-                    let mod_path = raw[..idx].trim();
-                    let top_pkg = mod_path.split('.').next().unwrap_or("").trim();
+            }
+            Stmt::ImportFrom(from_stmt) => {
+                if let Some(ref mod_name) = from_stmt.module {
+                    let top_pkg = mod_name.as_str().split('.').next().unwrap_or("").trim();
                     if is_valid_identifier(top_pkg) {
-                        self.record_import(top_pkg, in_type_checking, in_try, in_conditional_if, in_main_guard);
+                        self.record_import(top_pkg, ctx);
+                    }
+                }
+            }
+            Stmt::If(if_stmt) => {
+                let is_main = is_main_guard_expr(&if_stmt.test);
+                let is_tc = is_type_checking_expr(&if_stmt.test);
+                let is_uncond = is_unconditional_expr(&if_stmt.test);
+
+                let mut body_ctx = ctx;
+                if is_main {
+                    body_ctx.in_main_guard = true;
+                } else if is_tc {
+                    body_ctx.in_type_checking = true;
+                } else if !is_uncond {
+                    body_ctx.in_conditional = true;
+                }
+
+                for s in &if_stmt.body {
+                    self.walk_stmt(s, body_ctx);
+                }
+
+                let mut else_ctx = ctx;
+                if !is_uncond && !is_main && !is_tc {
+                    else_ctx.in_conditional = true;
+                }
+                for s in &if_stmt.orelse {
+                    self.walk_stmt(s, else_ctx);
+                }
+            }
+            Stmt::Try(try_stmt) => {
+                let mut try_ctx = ctx;
+                try_ctx.in_try = true;
+                for s in &try_stmt.body {
+                    self.walk_stmt(s, try_ctx);
+                }
+                for handler in &try_stmt.handlers {
+                    match handler {
+                        ast::ExceptHandler::ExceptHandler(h) => {
+                            for s in &h.body {
+                                self.walk_stmt(s, try_ctx);
+                            }
+                        }
+                    }
+                }
+                for s in &try_stmt.orelse {
+                    self.walk_stmt(s, try_ctx);
+                }
+                for s in &try_stmt.finalbody {
+                    self.walk_stmt(s, try_ctx);
+                }
+            }
+            Stmt::FunctionDef(fn_stmt) => {
+                let mut fn_ctx = ctx;
+                fn_ctx.in_conditional = true;
+                for s in &fn_stmt.body {
+                    self.walk_stmt(s, fn_ctx);
+                }
+            }
+            Stmt::AsyncFunctionDef(fn_stmt) => {
+                let mut fn_ctx = ctx;
+                fn_ctx.in_conditional = true;
+                for s in &fn_stmt.body {
+                    self.walk_stmt(s, fn_ctx);
+                }
+            }
+            Stmt::ClassDef(class_stmt) => {
+                for s in &class_stmt.body {
+                    self.walk_stmt(s, ctx);
+                }
+            }
+            Stmt::Assign(assign_stmt) => {
+                self.check_framework_assignment(&assign_stmt.targets, &assign_stmt.value);
+                self.check_expr_calls(&assign_stmt.value);
+            }
+            Stmt::AnnAssign(ann_assign) => {
+                if let Some(ref val) = ann_assign.value {
+                    let targets = vec![*ann_assign.target.clone()];
+                    self.check_framework_assignment(&targets, val);
+                    self.check_expr_calls(val);
+                }
+            }
+            Stmt::Expr(expr_stmt) => {
+                self.check_expr_calls(&expr_stmt.value);
+            }
+            _ => {}
+        }
+    }
+
+    fn check_framework_assignment(&mut self, targets: &[Expr], value: &Expr) {
+        if let Expr::Call(call) = value {
+            let func_name = match &*call.func {
+                Expr::Name(n) => n.id.as_str(),
+                Expr::Attribute(a) => a.attr.as_str(),
+                _ => "",
+            };
+
+            if func_name == "FastAPI" {
+                self.detected_framework = Some("fastapi".to_string());
+                self.has_app_object = true;
+                if let Some(target) = targets.first() {
+                    if let Expr::Name(n) = target {
+                        self.app_object_name = Some(n.id.to_string());
+                    }
+                }
+            } else if func_name == "Flask" {
+                self.detected_framework = Some("flask".to_string());
+                self.has_app_object = true;
+                if let Some(target) = targets.first() {
+                    if let Expr::Name(n) = target {
+                        self.app_object_name = Some(n.id.to_string());
                     }
                 }
             }
         }
     }
 
-    fn record_import(
-        &mut self,
-        top_pkg: &str,
-        in_type_checking: bool,
-        in_try: bool,
-        in_conditional_if: bool,
-        in_main_guard: bool,
-    ) {
-        if in_type_checking {
+    fn check_expr_calls(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Call(call) => {
+                match &*call.func {
+                    Expr::Name(n) if n.id.as_str() == "input" => {
+                        self.needs_stdin = true;
+                    }
+                    Expr::Attribute(a) => {
+                        if a.attr.as_str() == "read" || a.attr.as_str() == "readline" {
+                            if let Expr::Attribute(inner) = &*a.value {
+                                if inner.attr.as_str() == "stdin" {
+                                    self.needs_stdin = true;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                for arg in &call.args {
+                    self.check_expr_calls(arg);
+                }
+            }
+            Expr::Compare(comp) => {
+                self.check_expr_calls(&comp.left);
+                for c in &comp.comparators {
+                    self.check_expr_calls(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn record_import(&mut self, top_pkg: &str, ctx: AstWalkContext) {
+        if ctx.in_type_checking {
             self.type_checking_imports.insert(top_pkg.to_string());
             return;
         }
 
-        if in_try {
-            if !self.required_imports.contains(top_pkg) {
-                self.optional_imports.insert(top_pkg.to_string());
-            }
-        } else if in_conditional_if && !in_main_guard {
+        if ctx.in_try || (ctx.in_conditional && !ctx.in_main_guard) {
             if !self.required_imports.contains(top_pkg) {
                 self.optional_imports.insert(top_pkg.to_string());
             }
         } else {
             self.optional_imports.remove(top_pkg);
             self.required_imports.insert(top_pkg.to_string());
+        }
+    }
+
+    fn parse_source_fallback(&mut self, source: &str) {
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("import ") {
+                let raw = trimmed.trim_start_matches("import ").trim();
+                for part in raw.split(',') {
+                    let top = part.trim().split_whitespace().next().unwrap_or("").split('.').next().unwrap_or("");
+                    if is_valid_identifier(top) {
+                        self.required_imports.insert(top.to_string());
+                    }
+                }
+            } else if trimmed.starts_with("from ") {
+                let raw = trimmed.trim_start_matches("from ").trim();
+                if let Some(idx) = raw.find(" import ") {
+                    let top = raw[..idx].trim().split('.').next().unwrap_or("");
+                    if is_valid_identifier(top) {
+                        self.required_imports.insert(top.to_string());
+                    }
+                }
+            }
         }
     }
 
@@ -165,19 +256,44 @@ impl DependencyAstVisitor {
     }
 }
 
-fn extract_variable_assignment(line: &str, keyword: &str) -> Option<String> {
-    if let Some(pos) = line.find(keyword) {
-        let prefix = line[..pos].trim();
-        if let Some(eq_pos) = prefix.find('=') {
-            let var = prefix[..eq_pos].trim();
-            // In case of type annotation `app: FastAPI = FastAPI()`
-            let clean_var = var.split(':').next().unwrap_or("").trim();
-            if is_valid_identifier(clean_var) {
-                return Some(clean_var.to_string());
-            }
+fn is_main_guard_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Compare(comp) => {
+            let left_is_name = match &*comp.left {
+                Expr::Name(n) => n.id.as_str() == "__name__",
+                _ => false,
+            };
+            let has_eq = comp.ops.iter().any(|op| matches!(op, CmpOp::Eq));
+            let right_is_main = comp.comparators.iter().any(|c| match c {
+                Expr::Constant(const_val) => match &const_val.value {
+                    ast::Constant::Str(s) => s.as_str() == "__main__",
+                    _ => false,
+                },
+                _ => false,
+            });
+            left_is_name && has_eq && right_is_main
         }
+        _ => false,
     }
-    None
+}
+
+fn is_type_checking_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Name(n) => n.id.as_str() == "TYPE_CHECKING",
+        Expr::Attribute(a) => a.attr.as_str() == "TYPE_CHECKING",
+        _ => false,
+    }
+}
+
+fn is_unconditional_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Constant(c) => match &c.value {
+            ast::Constant::Bool(b) => *b,
+            _ => false,
+        },
+        Expr::Name(n) => n.id.as_str() == "__debug__",
+        _ => false,
+    }
 }
 
 fn is_valid_identifier(s: &str) -> bool {
@@ -256,5 +372,22 @@ if __name__ == '__main__':
         assert!(visitor.type_checking_imports.contains("mypy_boto3_s3"));
         assert!(visitor.type_checking_imports.contains("pydantic"));
     }
-}
 
+    #[test]
+    fn test_framework_app_detection() {
+        let code = r#"
+from fastapi import FastAPI
+app = FastAPI()
+
+def main():
+    x = input("Enter name: ")
+"#;
+        let mut visitor = DependencyAstVisitor::new();
+        visitor.parse_source(code);
+
+        assert_eq!(visitor.detected_framework.as_deref(), Some("fastapi"));
+        assert!(visitor.has_app_object);
+        assert_eq!(visitor.app_object_name.as_deref(), Some("app"));
+        assert!(visitor.needs_stdin);
+    }
+}
