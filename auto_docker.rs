@@ -1980,7 +1980,7 @@ impl Renderer {
             out.push_str("  mlflow:\n");
             out.push_str("    image: ghcr.io/mlflow/mlflow:v3.7.0\n");
             out.push_str("    restart: unless-stopped\n");
-            out.push_str("    command: [\"mlflow\", \"server\", \"--host\", \"0.0.0.0\", \"--port\", \"5000\", \"--backend-store-uri\", \"sqlite:////mlflow/mlflow.db\", \"--artifacts-destination\", \"/mlflow/artifacts\"]\n");
+            out.push_str("    command: [\"mlflow\", \"server\", \"--host\", \"0.0.0.0\", \"--port\", \"5000\", \"--backend-store-uri\", \"sqlite:////mlflow/mlflow.db\", \"--artifacts-destination\", \"/mlflow/artifacts\", \"--allowed-hosts\", \"*\"]\n");
             out.push_str("    ports:\n      - \"127.0.0.1:5000:5000\"\n");
             out.push_str("    volumes:\n      - mlflow-data:/mlflow\n");
             out.push_str("    healthcheck:\n");
@@ -2764,7 +2764,7 @@ pub struct RuntimeHealth;
 impl RuntimeHealth {
     pub fn check_container(container_name: &str) -> Result<String, OpsError> {
         let output = Command::new("docker")
-            .args(["inspect", "--format", "{{.State.Status}} (Health: {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}})", container_name])
+            .args(["inspect", "--format", "{{if ne .State.ExitCode 0}}CRASHED (ExitCode: {{.State.ExitCode}}){{else}}{{.State.Status}} (Health: {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}){{end}}", container_name])
             .output()
             .map_err(|e| OpsError::General(format!("Failed to inspect container {}: {}", container_name, e)))?;
 

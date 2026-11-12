@@ -2424,7 +2424,7 @@ class Renderer:
                 "command": ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000",
                             "--backend-store-uri", "sqlite:////mlflow/mlflow.db",
                             "--artifacts-destination", "/mlflow/artifacts",
-                            "--allowed-hosts", "mlflow,mlflow:5000,localhost,127.0.0.1,host.docker.internal"],
+                            "--allowed-hosts", "*"],
                 "ports": [f"127.0.0.1:{mlport}:5000"],
                 "volumes": ["mlflow-data:/mlflow"],
                 # The published MLflow image contains Python; no curl installation required.
@@ -4362,8 +4362,6 @@ class DockerAdapter:
             raise OpsError('Cannot read generated runtime metadata; run check first.') from exc
         if not isinstance(runtime, dict) or not isinstance(runtime.get('services'), list):
             raise OpsError('No runtime metadata: re-generate using this Auto Docker version, then verify.')
-        if runtime.get('execution_kind') == 'interactive':
-            return False, ["app: INTERACTIVE (use 'run YES' from a real terminal; detached ps cannot verify a CLI conversation)"]
         command = self._compose_command('ps', '--all', '--format', 'json')
         try:
             result = subprocess.run(command, cwd=self.root, capture_output=True, text=True,
@@ -4378,8 +4376,20 @@ class DockerAdapter:
             raise OpsError('Could not read Compose container states: ' + msg)
         if len(result.stdout) > 2_000_000:
             raise OpsError('Docker status output is too large to inspect.')
+        statuses = RuntimeHealth.parse(result.stdout)
+        if runtime.get('execution_kind') == 'interactive':
+            crashed = []
+            for item in statuses:
+                if item.get('Service') == 'app':
+                    state = str(item.get('State', '')).lower()
+                    exitcode = item.get('ExitCode')
+                    if state == 'exited' and exitcode not in (0, None):
+                        crashed.append(f"app: CRASHED (state=exited, exit code={exitcode}; inspect logs with option [1] for traceback)")
+            if crashed:
+                return False, crashed
+            return False, ["app: INTERACTIVE (use 'run YES' from a real terminal; detached ps cannot verify a CLI conversation)"]
         return RuntimeHealth.evaluate(runtime['services'], runtime.get('batch') is True,
-                                      RuntimeHealth.parse(result.stdout))
+                                      statuses)
 
     @staticmethod
     def health_hints(lines: list[str]) -> list[str]:
@@ -5642,6 +5652,10 @@ class Console:
                         print("=" * 80)
                         self.smart_stage = "result"
                         return
+                    try:
+                        adapter.run("down")
+                    except Exception:
+                        pass
                     print("\nBuilding container image...")
                     adapter.run("build")
                     print("\nStarting container services...")
@@ -6524,6 +6538,14 @@ class Console:
         if not self.settings:
             raise OpsError("No project selected.")
         root = self.settings.target.root
+        inspection = self._inspect()
+        if inspection.dependency is None and self.settings.dependency_mode == "strict":
+            audit = DependencyAudit().report(inspection)
+            unresolved = audit.required_candidates if audit.required_candidates else audit.possible_missing
+            if unresolved:
+                self.settings.dependency_mode = "infer"
+                print("\n[SMART Mode] Unmanifested dependencies detected: " + ", ".join(unresolved[:6]))
+                print("             Auto-enabled dependency inference to install required packages in container.")
         digest = DeploymentDigest.compute(
             root,
             "smart_deploy",
@@ -6552,6 +6574,13 @@ class Console:
         if not self.settings:
             raise OpsError("No project selected.")
         root = self.settings.target.root
+        inspection = self._inspect()
+        if inspection.dependency is None and self.settings.dependency_mode == "strict":
+            audit = DependencyAudit().report(inspection)
+            unresolved = audit.required_candidates if audit.required_candidates else audit.possible_missing
+            if unresolved:
+                self.settings.dependency_mode = "infer"
+                print("\n[SMART Mode] Auto-enabled dependency inference for: " + ", ".join(unresolved[:6]))
         plan = self._plan()
         files = self.renderer.files(plan)
         manager = OutputManager(root)
