@@ -1272,6 +1272,56 @@ impl Inspector {
     }
 }
 
+pub fn detect_python_version_and_image(root: &Path, imports: &HashSet<String>, gpu: bool) -> (String, String) {
+    if gpu {
+        if imports.contains("tensorflow") || imports.contains("tf") {
+            return ("tensorflow/tensorflow:latest-gpu".to_string(), "Auto-detected TensorFlow with GPU acceleration".to_string());
+        }
+        return ("pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime".to_string(), "Auto-detected PyTorch with CUDA 12.1 runtime".to_string());
+    }
+
+    if root.join("uv.lock").is_file() {
+        return ("ghcr.io/astral-sh/uv:python3.12-bookworm-slim".to_string(), "Auto-detected uv.lock (Astral uv fast runtime)".to_string());
+    }
+
+    let pv = root.join(".python-version");
+    if pv.is_file() {
+        if let Ok(content) = fs::read_to_string(&pv) {
+            let trimmed = content.trim();
+            for ver in &["3.13", "3.12", "3.11", "3.10", "3.9"] {
+                if trimmed.contains(ver) {
+                    return (format!("python:{}-slim-bookworm", ver), format!("Auto-detected Python {} from .python-version", ver));
+                }
+            }
+        }
+    }
+
+    let rt = root.join("runtime.txt");
+    if rt.is_file() {
+        if let Ok(content) = fs::read_to_string(&rt) {
+            let trimmed = content.trim();
+            for ver in &["3.13", "3.12", "3.11", "3.10", "3.9"] {
+                if trimmed.contains(ver) {
+                    return (format!("python:{}-slim-bookworm", ver), format!("Auto-detected Python {} from runtime.txt", ver));
+                }
+            }
+        }
+    }
+
+    let ppt = root.join("pyproject.toml");
+    if ppt.is_file() {
+        if let Ok(content) = fs::read_to_string(&ppt) {
+            for ver in &["3.13", "3.12", "3.11", "3.10", "3.9"] {
+                if content.contains(&format!("3.{}", &ver[2..])) || content.contains(ver) {
+                    return (format!("python:{}-slim-bookworm", ver), format!("Auto-detected Python {} from pyproject.toml", ver));
+                }
+            }
+        }
+    }
+
+    ("python:3.12-slim-bookworm".to_string(), "Standard Python 3.12 Slim (minimal fast Debian)".to_string())
+}
+
 // ============================================================================
 // 8. Storage Budget & Probing
 // ============================================================================
@@ -1831,6 +1881,11 @@ impl Planner {
             }
         }
 
+        let python_image = settings.python_image.clone().unwrap_or_else(|| {
+            let (img, _) = detect_python_version_and_image(&settings.target.root, &inspection.entry.required_imports, settings.gpu);
+            img
+        });
+
         Ok(Plan {
             inspection,
             mode,
@@ -1843,13 +1898,7 @@ impl Planner {
             inferred_packages,
             execution_kind,
             health_path: settings.health_path.clone(),
-            python_image: settings.python_image.clone().unwrap_or_else(|| {
-                if settings.gpu {
-                    "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime".to_string()
-                } else {
-                    "python:3.12-slim-bookworm".to_string()
-                }
-            }),
+            python_image,
             persistent_dirs,
             replicas: settings.replicas,
             cpus: settings.cpus.clone(),
@@ -3342,6 +3391,15 @@ impl SmartDecisionEngine {
             confidence.push(("Dependencies".to_string(), "CONFIRMED".to_string(), "All AST-detected imports resolved".to_string()));
         } else {
             confidence.push(("Dependencies".to_string(), "INFERRED".to_string(), format!("{} imports require pip install", inspection.entry.optional_imports.len())));
+        }
+
+        if let Some(ref p) = plan {
+            let (_, reason) = detect_python_version_and_image(&active_settings.target.root, &inspection.entry.required_imports, active_settings.gpu);
+            if active_settings.python_image.is_some() {
+                confidence.push(("Base Image".to_string(), "CONFIRMED".to_string(), format!("{} (Custom user selection)", p.python_image)));
+            } else {
+                confidence.push(("Base Image".to_string(), "CONFIRMED".to_string(), format!("{} ({})", p.python_image, reason)));
+            }
         }
 
         let mut risks = Vec::new();

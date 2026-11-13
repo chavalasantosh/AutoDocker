@@ -868,6 +868,58 @@ def _deps(root: Path) -> str | None:
     return None
 
 
+def detect_python_version_and_image(root: Path, imports: frozenset[str] | set[str] = frozenset(), gpu: bool = False) -> tuple[str, str]:
+    """Infers the optimal base image and human-readable reason from project files and dependencies."""
+    # 1. Specialized AI GPU runtime if GPU is requested and AI packages present
+    if gpu:
+        if imports & {"tensorflow", "tf"}:
+            return "tensorflow/tensorflow:latest-gpu", "Auto-detected TensorFlow with GPU acceleration"
+        return "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime", "Auto-detected GPU acceleration (PyTorch CUDA 12.1)"
+
+    # 2. Check for Astral UV lockfile
+    if (root / "uv.lock").is_file():
+        return "ghcr.io/astral-sh/uv:python3.12-bookworm-slim", "Auto-detected uv.lock (Astral uv fast runtime)"
+
+    # 3. Check .python-version (pyenv standard)
+    pv = root / ".python-version"
+    if pv.is_file():
+        try:
+            val = pv.read_text(encoding="utf-8", errors="replace").strip()
+            m = re.search(r"(?:python-)?(3\.\d+)", val)
+            if m:
+                ver = m.group(1)
+                return f"python:{ver}-slim-bookworm", f"Auto-detected Python {ver} from .python-version"
+        except Exception:
+            pass
+
+    # 4. Check runtime.txt (Heroku / Cloud standard)
+    rt = root / "runtime.txt"
+    if rt.is_file():
+        try:
+            val = rt.read_text(encoding="utf-8", errors="replace").strip()
+            m = re.search(r"python-(3\.\d+)", val)
+            if m:
+                ver = m.group(1)
+                return f"python:{ver}-slim-bookworm", f"Auto-detected Python {ver} from runtime.txt"
+        except Exception:
+            pass
+
+    # 5. Check pyproject.toml (requires-python = ">=3.11" or python_version)
+    ppt = root / "pyproject.toml"
+    if ppt.is_file():
+        try:
+            txt = ppt.read_text(encoding="utf-8", errors="replace")[:100_000]
+            m = re.search(r'(?:requires-python|python_version)\s*=\s*["\'](?:[><=~^ ]*)(3\.\d+)', txt)
+            if m:
+                ver = m.group(1)
+                return f"python:{ver}-slim-bookworm", f"Auto-detected Python {ver} from pyproject.toml"
+        except Exception:
+            pass
+
+    # 6. Default standard: Python 3.12 Slim Bookworm
+    return "python:3.12-slim-bookworm", "Standard Python 3.12 Slim (minimal fast Debian)"
+
+
 # ---------- Read-only Python dependency preflight ----------
 # Standard library immunity: stdlib modules must NEVER be classified as missing
 STDLIB_MODULES: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset({
@@ -2122,7 +2174,15 @@ class Planner:
                         any(x in item for x in ('\x00', '\r', '\n')) for item in override)):
                 raise OpsError('Custom command must be 1-32 nonempty exec-form arguments')
             command = tuple(override)
-        image = settings.python_image or 'python:3.12-slim-bookworm'
+        if settings.python_image:
+            image = settings.python_image
+        else:
+            inferred_image, _ = detect_python_version_and_image(
+                settings.target.root,
+                inspection.entry.imports,
+                settings.gpu
+            )
+            image = inferred_image
         if (len(image) > 240 or not re.fullmatch(r'[A-Za-z0-9_./:@-]+', image) or
                 '@' in image and not re.search(r'@sha256:[a-f0-9]{64}$', image)):
             raise OpsError('Python image must be a valid image reference (optionally @sha256:<64-hex-digest>)')
@@ -5014,6 +5074,13 @@ class SmartDecisionEngine:
         else:
             confidence_findings.append(("Start Command", "INFERRED", f"Auto: {' '.join(plan.command)}"))
 
+        # Base Image Flavor & Version finding
+        _, auto_reason = detect_python_version_and_image(resolved_root, inspection.entry.imports, effective_settings.gpu)
+        if effective_settings.python_image:
+            confidence_findings.append(("Base Image", "CONFIRMED", f"{plan.python_image} (Custom user selection)"))
+        else:
+            confidence_findings.append(("Base Image", "CONFIRMED", f"{plan.python_image} ({auto_reason})"))
+
         # Dependencies
         dep_report = DependencyAudit().report(inspection)
         unresolved: list[str] = []
@@ -5952,7 +6019,8 @@ class Console:
         print(f" [8] Security Policy  : {'ALLOW INSECURE' if self.allow_insecure else 'BLOCK CRITICAL'}")
         print(f" [9] Scale (Replicas) : {getattr(self.settings, 'replicas', 1)}")
         print(f"[10] Resource Limits  : CPUs={getattr(self.settings, 'cpus', None) or 'unlimited'}, Memory={getattr(self.settings, 'memory', None) or 'unlimited'}")
-        print(f"[11] Base Image Flavor: {self.settings.python_image or 'python:3.12-slim-bookworm (default slim)'}")
+        img_display = self.settings.python_image if self.settings.python_image else "Auto-Detect (python:3.12-slim-bookworm)"
+        print(f"[11] Base Image Flavor: {img_display}")
         print("-" * 80)
         print("Quick Actions: enter [1-11] to customize, or direct command ('replicas 3', 'resources cpus=2 memory=4G').")
         print("Enter '0', 'b', or 'done' to return to Main Menu.")
@@ -6017,26 +6085,48 @@ class Console:
                 self.settings_stage = "main"
                 self.render_settings()
                 return True
-            flavors = {
+            if cmd in {"a", "auto", "default", "reset", "none"}:
+                self._set(python_image=None)
+                print("Base image reset to: Auto-Detect (inferred from repository)")
+                self.settings_stage = "main"
+                self.render_settings()
+                return True
+            catalog = {
                 "1": "python:3.12-slim-bookworm",
-                "2": "python:3.12-alpine",
-                "3": "python:3.12-bookworm",
-                "4": "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime",
-                "5": "python:3.11-slim-bookworm",
-                "6": "python:3.10-slim-bookworm",
+                "2": "python:3.11-slim-bookworm",
+                "3": "python:3.10-slim-bookworm",
+                "4": "python:3.13-slim-bookworm",
+                "5": "python:3.12-bookworm",
+                "6": "ubuntu:24.04",
+                "7": "ubuntu:22.04",
+                "8": "registry.access.redhat.com/ubi9/python-311:latest",
+                "9": "cgr.dev/chainguard/python:latest",
+                "10": "gcr.io/distroless/python3-debian12:latest",
+                "11": "ghcr.io/astral-sh/uv:python3.12-bookworm-slim",
+                "12": "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime",
+                "13": "tensorflow/tensorflow:latest-gpu",
+                "14": "python:3.12-alpine",
                 "slim": "python:3.12-slim-bookworm",
                 "alpine": "python:3.12-alpine",
                 "full": "python:3.12-bookworm",
+                "ubuntu": "ubuntu:24.04",
+                "redhat": "registry.access.redhat.com/ubi9/python-311:latest",
+                "ubi": "registry.access.redhat.com/ubi9/python-311:latest",
+                "chainguard": "cgr.dev/chainguard/python:latest",
+                "distroless": "gcr.io/distroless/python3-debian12:latest",
+                "uv": "ghcr.io/astral-sh/uv:python3.12-bookworm-slim",
                 "gpu": "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime",
+                "pytorch": "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime",
+                "tensorflow": "tensorflow/tensorflow:latest-gpu",
             }
-            chosen = flavors.get(cmd, line.strip() if ("/" in line or ":" in line) else None)
+            chosen = catalog.get(cmd, line.strip() if ("/" in line or ":" in line) else None)
             if chosen:
                 self._set(python_image=chosen)
                 print(f"Base image set to: {chosen}")
                 self.settings_stage = "main"
                 self.render_settings()
                 return True
-            print("Invalid choice. Select [1-6] or enter a custom image name (or '0' to cancel).")
+            print("Invalid choice. Select [A], [1-14], enter keyword ('ubuntu', 'ubi', 'chainguard', 'uv'), or any image name (or '0' to cancel).")
             return True
 
         if cmd == "1":
@@ -6105,15 +6195,32 @@ class Console:
             self.render_settings()
             return True
         if cmd in {"11", "image", "flavor", "base"}:
-            print("\nSelect Base Image Flavor:")
-            print("  [1] Slim (Recommended, ~140MB - Debian minimal fast)")
-            print("  [2] Alpine (Ultra-light, ~45MB - Minimal musl microservice)")
-            print("  [3] Full Debian (Build-ready with gcc/g++ for C-extensions)")
-            print("  [4] GPU / CUDA (PyTorch 2.3 + CUDA 12.1 runtime)")
-            print("  [5] Python 3.11 Slim (python:3.11-slim-bookworm)")
-            print("  [6] Python 3.10 Slim (python:3.10-slim-bookworm)")
-            print("  Or enter any custom Docker image (e.g. python:3.13-rc-slim)")
-            print("Type number [1-6] or image name:")
+            print("\n" + "=" * 80)
+            print("BASE IMAGE SELECTION CATALOG (Universal Enterprise Runtimes)")
+            print("=" * 80)
+            print("  [A] Auto-Detect     — Inferred from repo (.python-version, pyproject.toml, GPU)")
+            print("\n  --- Official Standard Python (Debian Bookworm) ---")
+            print("  [1] Python 3.12 Slim (Recommended minimal fast Debian)")
+            print("  [2] Python 3.11 Slim (Enterprise stable standard)")
+            print("  [3] Python 3.10 Slim (LTS stable standard)")
+            print("  [4] Python 3.13 Slim (Latest Python release)")
+            print("  [5] Python 3.12 Full (Debian build-ready with gcc/g++ build toolchain)")
+            print("\n  --- Enterprise & Corporate Foundations ---")
+            print("  [6] Ubuntu 24.04 LTS (Noble Numbat enterprise foundation)")
+            print("  [7] Ubuntu 22.04 LTS (Jammy Jellyfish enterprise foundation)")
+            print("  [8] Red Hat UBI 9    (Universal Base Image — ubi9/python-311)")
+            print("\n  --- High-Security & Hardened (Zero-CVE) ---")
+            print("  [9] Chainguard Zero-CVE (cgr.dev/chainguard/python - minimal attack surface)")
+            print(" [10] Google Distroless   (gcr.io/distroless/python3 - hardened, no shell)")
+            print("\n  --- Next-Gen Ultra-Fast Builds ---")
+            print(" [11] Astral uv           (ghcr.io/astral-sh/uv - 10x-50x faster pip installs)")
+            print("\n  --- AI, Deep Learning & GPU Acceleration ---")
+            print(" [12] PyTorch CUDA 12.1   (pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime)")
+            print(" [13] TensorFlow GPU      (tensorflow/tensorflow:latest-gpu)")
+            print("\n  --- Ultra-Lightweight Microservices ---")
+            print(" [14] Alpine Linux        (python:3.12-alpine — ultra-compact 45MB)")
+            print("-" * 80)
+            print("Type [A], a number [1-14], a keyword, or any custom image tag/digest:")
             self.settings_stage = "image"
             return True
 
