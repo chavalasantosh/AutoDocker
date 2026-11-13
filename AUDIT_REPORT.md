@@ -248,19 +248,32 @@ Quick Actions: enter [1-11] to customize, or type 'generate' / 'up'.
 
 ## 6. Static Analysis Hardening & Audit Bug Fixes
 
-A comprehensive static and security audit identified and eliminated key edge-case vulnerabilities and operational crash bugs:
+A comprehensive static and security audit identified and eliminated key edge-case vulnerabilities, operational crash bugs, and multi-platform parity gaps across both engines:
 
 | Subsystem | Vulnerability / Issue | Root Cause | Implemented Resolution |
 | :--- | :--- | :--- | :--- |
-| **SMART Deploy** | `FrozenInstanceError` crash on manifest-less projects | Direct mutation of `frozen=True` `Settings` in `_stage_smart_deploy` | Replaced with `self._set(dependency_mode="infer")` using `dataclasses.replace`. |
-| **Existing Stacks** | `AttributeError` on port mapping & readiness findings | String ports treated as `PublishedPort` objects; missing `.name` attribute on `ReadinessFinding` | Properly parsed string ports (`host:container`) and used `f.key or f.message`. |
-| **Digest Stability** | Staged approval failure with Grafana | Random `secrets.token_urlsafe` evaluated on every render causing digest mismatches | Replaced with stable environment variable placeholder `${GF_SECURITY_ADMIN_PASSWORD:?...}` avoiding secret leakage. |
-| **Wizard Staging** | `AttributeError` when queuing `check` command | `after=(action,)` initialized as tuple instead of list | Replaced with `after=[action]` and ensured list conversion before appending. |
-| **Session Resilience** | Unhandled exception crash hole in `Console.loop` | Loop only caught `OpsError` and `OSError`; `ValueError`/`KeyError` killed session | Added global `except Exception` handler to preserve user's workbench session. |
-| **Volume Protection** | Unintentional deletion of anonymous volumes | `ResourceCleaner.execute` called `docker rm -f -v` | Removed `-v` flag from container removal to strictly preserve all volumes. |
-| **Command Injection** | Build-time shell injection via malicious dependency filenames | Unquoted `requirements` passed directly to `RUN ... pip install -r {requirements}` | Added regex validation `[A-Za-z0-9_./-]+` and `shlex.quote` sanitization. |
-| **Lock Management** | Stale locks never detected in recovery coordinator | `SmartRecoveryCoordinator` called non-existent `lock.is_stale()` | Added `is_stale()` method to `ProjectLock` wrapping `stale_reason()`. |
-| **Rust Parity** | Mojibake and AST evaluation flaw | `has_main_guard` returned `|| true`; mojibake characters in banner output | Corrected `has_main_guard` to evaluate actual syntax; cleaned mojibake characters. |
+| **SMART Deploy [PY]** | `FrozenInstanceError` crash on manifest-less projects | Direct mutation of `frozen=True` `Settings` in `_stage_smart_deploy` | Replaced with `self._set(dependency_mode="infer")` using `dataclasses.replace`. |
+| **Existing Stacks [PY]** | `AttributeError` on port mapping & readiness findings | String ports treated as `PublishedPort` objects; missing `.name` attribute on `ReadinessFinding` | Properly parsed string ports (`host:container`) and used `f.key or f.message`. |
+| **Digest Stability [PY]** | Staged approval failure with Grafana | Random `secrets.token_urlsafe` evaluated on every render causing digest mismatches | Replaced with stable environment variable placeholder `${GF_SECURITY_ADMIN_PASSWORD:?...}` avoiding secret leakage. |
+| **Wizard Staging [PY]** | `AttributeError` when queuing `check` command | `after=(action,)` initialized as tuple instead of list | Replaced with `after=[action]` and ensured list conversion before appending. |
+| **Session Resilience [PY]** | Unhandled exception crash hole in `Console.loop` | Loop only caught `OpsError` and `OSError`; `ValueError`/`KeyError` killed session | Added global `except Exception` handler to preserve user's workbench session. |
+| **Volume Protection [PY]** | Unintentional deletion of anonymous volumes | `ResourceCleaner.execute` called `docker rm -f -v` | Removed `-v` flag from container removal to strictly preserve all volumes. |
+| **Command Injection [PY]** | Build-time shell injection via malicious dependency filenames | Unquoted `requirements` passed directly to `RUN ... pip install -r {requirements}` | Added regex validation `[A-Za-z0-9_./-]+` and `shlex.quote` sanitization. |
+| **Lock Management [PY]** | Stale locks never detected in recovery coordinator | `SmartRecoveryCoordinator` called non-existent `lock.is_stale()` | Added `is_stale()` method to `ProjectLock` wrapping `stale_reason()`. |
+| **Multi-Platform Users [PY/RS]** | Dockerfile user creation crashes on Alpine / Distroless | `groupadd`/`useradd` absent in Alpine (`apk`) and Distroless/Chainguard | Employs `addgroup -S app && adduser -S app -G app` for Alpine, `USER nonroot` for Distroless/Chainguard, and Debian shadow tools for Slim/Ubuntu/UBI. |
+| **Storage Defense [PY/RS]** | Unbounded Docker log accumulation filling host disks | Default `json-file` logging driver keeps unbounded history | Enforced `logging: driver: "json-file", options: {max-size: "10m", max-file: "3"}` on all generated services. |
+| **Secret Ignore [PY/RS]** | Enterprise secrets baked into container image under standard Docker | `.dockerignore` missed cloud credentials, tokens, keystores, and local databases | Expanded ignore catalog to include `*.token`, `service-account*.json`, `kubeconfig`, `.docker/config.json`, `terraform.tfstate`, `*.keystore`, `.gcloud`, and `*.db`. |
+| **System Traversal [PY/RS]** | Refusal of system and root filesystem targets | `target_for` only checked `$HOME` and drive roots | Refuses all system folders (`/etc`, `/var`, `/usr`, `/bin`, `C:/Windows`, `Program Files`, etc.). |
+| **Binary Planting [PY]** | Windows current working directory binary hijacking | `shutil.which("docker")` on Windows searches CWD by default | Created `_safe_which` which validates resolved binary location and rejects project root executables. |
+| **Terminal Injection [PY]** | Host terminal escape code execution via malicious container logs | `get_logs` printed raw container `stdout`/`stderr` without ANSI stripping | Implemented regex filter stripping ANSI escape sequences (`\x1b[...]`) and non-printable control characters. |
+| **Health Timing & TTY [PY]** | False "degraded" reports during container startup & detached CLI apps | Immediate `verify()` right after `up -d` before `start_period`; running detached `input()` | Added startup retry polling loop for `starting` status; guides interactive apps to foreground `run --rm app`. |
+| **Stack Build Flow [PY]** | Existing compose stacks with `build:` services failing on `up` | Applied `--no-build` flag preventing image compilation | Updated `up` command to `--build` guaranteeing unbuilt images compile cleanly. |
+| **CLI Argument Parity [RS]** | Documented options `--project`, `--gpu`, `--mode` ignored | `run_cli` only inspected `args[0]` without flag parsing | Implemented full flag parser and wired settings into Console and command execution. |
+| **Settings Retention [RS]** | User workbench customizations wiped out during preview / generate | `run_preview` and `run_generate` called fresh `Settings::new(target)` | Replaced with `self.settings.as_ref().cloned()` preserving toggled GPU, base image, and modes. |
+| **Compose Safety [RS]** | Parent directory context leakage & destructive file overwrite | Root `docker-compose.yml` destroyed without backup; `context: ..` in root compose | Creates `docker-compose.yml.bak` and sanitizes root compose copy with `context: .`. |
+| **Dependency Confusion [RS]** | Local project modules treated as PyPI packages | `resolve_pypi_package` forwarded unknown imports straight to `pip install` | Checks project directory for local `.py` files and submodules before adding to `inferred_packages`. |
+| **Secret Sanitization [RS]** | Secret value printed in preflight failure message | `NativeReadiness` printed `{key}={val}` in failure string | Sanitized to report only `{key}`, preventing secret leakage in CI/terminal logs. |
+| **Dynamic Stubs [RS]** | Canned "Ready to deploy" strings in Console options 9 & 10 | Methods printed static strings without executing engine checks | Wired `run_deployment_plan` and `run_stage_deployment` to actual `Planner` and `NativeReadiness`. |
 
 ---
 

@@ -1682,8 +1682,8 @@ impl NativeReadiness {
                         let key = trimmed[..pos].trim();
                         let val = trimmed[pos + 1..].trim().trim_matches('"').trim_matches('\'').to_lowercase();
                         if val == "changeme" || val == "password" || val == "secret" || val == "admin123" || val.contains("your_password_here") || val.contains("placeholder") {
-                    failures.push(format!("Placeholder password found in .env: {}={}", key, val));
-                            warnings.push(format!("Insecure placeholder found in .env: {}={}", key, val));
+                            failures.push(format!("Placeholder password found in .env for variable '{}'", key));
+                            warnings.push(format!("Insecure placeholder found in .env for variable '{}'", key));
                             findings.push(ReadinessFinding {
                                 level: "WARNING".to_string(),
                                 category: "Environment".to_string(),
@@ -1717,8 +1717,8 @@ impl OfflineDeploymentAudit {
         if !df.is_file() {
             problems.push("Generated Dockerfile missing".to_string());
         } else if let Ok(s) = fs::read_to_string(&df) {
-            if !s.contains("USER app") {
-                problems.push("Dockerfile lacks unprivileged USER app instruction".to_string());
+            if !s.contains("USER app") && !s.contains("USER nonroot") {
+                problems.push("Dockerfile lacks unprivileged USER instruction".to_string());
             }
             if !s.contains("CMD [") {
                 problems.push("Dockerfile lacks exec-form CMD".to_string());
@@ -1869,7 +1869,14 @@ impl Planner {
         if inspection.dependency.is_none() {
             for imp in &inspection.entry.required_imports {
                 if !is_stdlib_module(imp) {
-                    inferred_packages.push(resolve_pypi_package(imp));
+                    let local_py = inspection.root.join(format!("{}.py", imp));
+                    let local_dir = inspection.root.join(imp);
+                    if !local_py.is_file() && !local_dir.is_dir() {
+                        let pkg = resolve_pypi_package(imp);
+                        if pkg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+                            inferred_packages.push(pkg);
+                        }
+                    }
                 }
             }
             inferred_packages.sort();
@@ -1937,7 +1944,7 @@ impl Renderer {
         out.push_str("ENV PYTHONDONTWRITEBYTECODE=1 \\\n    PYTHONUNBUFFERED=1\n\n");
 
         if plan.inspection.dependency.is_some() {
-            out.push_str("COPY requirements.txt* pyproject.toml* ./\n");
+            out.push_str("COPY . /build\n");
             out.push_str("RUN if [ -f requirements.txt ]; then \\\n");
             out.push_str("        pip install --no-cache-dir --user -r requirements.txt; \\\n");
             out.push_str("    elif [ -f pyproject.toml ]; then \\\n");
@@ -1954,14 +1961,29 @@ impl Renderer {
         out.push_str("WORKDIR /app\n");
         out.push_str("ENV PYTHONDONTWRITEBYTECODE=1 \\\n    PYTHONUNBUFFERED=1 \\\n    PATH=/home/app/.local/bin:$PATH\n\n");
 
-        out.push_str("RUN groupadd -r app && useradd -r -g app -d /home/app -m app\n\n");
+        if plan.python_image.contains("alpine") {
+            out.push_str("RUN addgroup -S app && adduser -S app -G app && chown app:app /app\n\n");
+        } else if plan.python_image.contains("distroless") || plan.python_image.contains("chainguard") {
+            out.push_str("# Pre-configured nonroot user in minimal runtime\n\n");
+        } else {
+            out.push_str("RUN groupadd -r app && useradd -r -g app -d /home/app -m app\n\n");
+        }
         out.push_str("COPY --from=builder --chown=app:app /root/.local /home/app/.local\n");
         out.push_str("COPY --chown=app:app . /app\n\n");
 
         if plan.execution_kind == ExecutionKind::Web {
-            out.push_str("HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8000/ || exit 1\n\n");
+            let p = plan.port.unwrap_or(8000);
+            let health_path = plan.health_path.as_deref().unwrap_or("/");
+            out.push_str(&format!(
+                "HEALTHCHECK --interval=30s --timeout=5s CMD python -c \"import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:{}{}', timeout=4).getcode() < 400 else 1)\" || exit 1\n\n",
+                p, health_path
+            ));
         }
-        out.push_str("USER app\n\n");
+        if plan.python_image.contains("distroless") || plan.python_image.contains("chainguard") {
+            out.push_str("USER nonroot\n\n");
+        } else {
+            out.push_str("USER app\n\n");
+        }
 
         let cmd_formatted: Vec<String> = plan.command.iter().map(|s| format!("\"{}\"", s)).collect();
         out.push_str(&format!("CMD [{}]\n", cmd_formatted.join(", ")));
@@ -1998,6 +2020,9 @@ impl Renderer {
 
         out.push_str("    environment:\n");
         out.push_str("      - PYTHONUNBUFFERED=1\n");
+        if plan.services.contains(&"postgres".to_string()) {
+            out.push_str("      - DATABASE_URL=postgresql://app:${POSTGRES_PASSWORD:-postgres}@postgres:5432/app\n");
+        }
         if plan.services.contains(&"mlflow".to_string()) {
             out.push_str("      - MLFLOW_TRACKING_URI=http://mlflow:5000\n");
         }
@@ -2014,6 +2039,7 @@ impl Renderer {
                 out.push_str(&format!("      - GRADIO_SERVER_PORT={}\n", p));
             }
         }
+        out.push_str("    logging:\n      driver: \"json-file\"\n      options:\n        max-size: \"10m\"\n        max-file: \"3\"\n");
 
         if let Some(port) = plan.port {
             if plan.execution_kind == ExecutionKind::Web {
@@ -2059,11 +2085,12 @@ impl Renderer {
         }
 
         if plan.services.contains(&"mlflow".to_string()) {
+            let mlflow_host_port = if plan.port == Some(5000) { 5001 } else { 5000 };
             out.push_str("  mlflow:\n");
             out.push_str("    image: ghcr.io/mlflow/mlflow:v3.7.0\n");
             out.push_str("    restart: unless-stopped\n");
             out.push_str("    command: [\"mlflow\", \"server\", \"--host\", \"0.0.0.0\", \"--port\", \"5000\", \"--backend-store-uri\", \"sqlite:////mlflow/mlflow.db\", \"--artifacts-destination\", \"/mlflow/artifacts\", \"--allowed-hosts\", \"*\"]\n");
-            out.push_str("    ports:\n      - \"127.0.0.1:5000:5000\"\n");
+            out.push_str(&format!("    ports:\n      - \"127.0.0.1:{}:5000\"\n", mlflow_host_port));
             out.push_str("    volumes:\n      - mlflow-data:/mlflow\n");
             out.push_str("    healthcheck:\n");
             out.push_str("      test: [\"CMD\", \"python\", \"-c\", \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3).read()\"]\n");
@@ -2095,6 +2122,21 @@ impl Renderer {
             out.push_str("      interval: 5s\n      timeout: 3s\n      retries: 10\n      start_period: 10s\n");
         }
 
+        if plan.services.contains(&"postgres".to_string()) {
+            out.push_str("  postgres:\n");
+            out.push_str("    image: postgres:16-alpine\n");
+            out.push_str("    restart: unless-stopped\n");
+            out.push_str("    environment:\n");
+            out.push_str("      - POSTGRES_DB=app\n");
+            out.push_str("      - POSTGRES_USER=app\n");
+            out.push_str("      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}\n");
+            out.push_str("    ports:\n      - \"127.0.0.1:5432:5432\"\n");
+            out.push_str("    volumes:\n      - postgres-data:/var/lib/postgresql/data\n");
+            out.push_str("    healthcheck:\n");
+            out.push_str("      test: [\"CMD-SHELL\", \"pg_isready -U app -d app || exit 1\"]\n");
+            out.push_str("      interval: 5s\n      timeout: 3s\n      retries: 10\n      start_period: 10s\n");
+        }
+
         if !plan.services.is_empty() {
             out.push_str("volumes:\n");
             if plan.services.contains(&"mlflow".to_string()) {
@@ -2105,6 +2147,9 @@ impl Renderer {
             }
             if plan.services.contains(&"redis".to_string()) {
                 out.push_str("  redis-data:\n");
+            }
+            if plan.services.contains(&"postgres".to_string()) {
+                out.push_str("  postgres-data:\n");
             }
         }
 
@@ -2129,7 +2174,7 @@ impl Renderer {
     }
 
     pub fn dockerignore() -> String {
-        ".git\n.opsforge*\n__pycache__\n*.pyc\n.venv\nvenv\n.idea\n.vscode\nnode_modules\n*.gguf\n*.safetensors\n*.pt\n*.bin\n.env*\n*.pem\n*.key\n".to_string()
+        ".git\n.opsforge*\n__pycache__\n*.pyc\n.venv\nvenv\n.idea\n.vscode\nnode_modules\n*.gguf\n*.safetensors\n*.pt\n*.bin\n.env*\n*.pem\n*.key\n*.token\ntoken.json\nservice-account*.json\nservice_account*.json\nkubeconfig\n.kube\n.docker/config.json\nterraform.tfstate*\n.terraform\n*.keystore\n.gcloud\n*.sqlite3\n*.db\n".to_string()
     }
 
     pub fn instructions(plan: &Plan) -> String {
@@ -2248,13 +2293,18 @@ impl OutputManager {
         if df_orig.exists() {
             let _ = fs::copy(&df_orig, project_root.join("Dockerfile.bak"));
         }
+        let comp_orig = project_root.join("docker-compose.yml");
+        if comp_orig.exists() {
+            let _ = fs::copy(&comp_orig, project_root.join("docker-compose.yml.bak"));
+        }
         let om = OutputManager::new(project_root);
         let mut files = HashMap::new();
         files.insert("Dockerfile".to_string(), dockerfile.to_string());
         files.insert("compose.yaml".to_string(), compose.to_string());
         let _ = om.write(&files)?;
         let _ = fs::write(project_root.join("Dockerfile"), dockerfile);
-        let _ = fs::write(project_root.join("docker-compose.yml"), compose);
+        let root_compose = compose.replace("context: ..", "context: .");
+        let _ = fs::write(project_root.join("docker-compose.yml"), &root_compose);
         Ok(())
     }
     pub fn new(project_root: &Path) -> Self {
@@ -3791,50 +3841,100 @@ impl Console {
 
     fn run_preview(&mut self) {
         let root = self.settings.as_ref().map(|s| s.target.root.clone()).unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        if let Ok(target) = target_for_path(&root) {
-            let s = Settings::new(target);
-            if let Ok(ins) = Inspector::inspect(&s.target, None) {
-                if let Ok(plan) = Planner::build(&s, ins) {
-                    println!("\n--- Generated Dockerfile Preview ---");
-                    println!("{}", Renderer::dockerfile(&plan));
-                    println!("--- Generated Compose Preview ---");
-                    println!("{}", Renderer::compose(&plan));
-                }
+        let s = if let Some(ref cur) = self.settings {
+            cur.clone()
+        } else if let Ok(target) = target_for_path(&root) {
+            Settings::new(target)
+        } else {
+            println!("  [ERROR] Invalid target path");
+            return;
+        };
+        if let Ok(ins) = Inspector::inspect(&s.target, None) {
+            if let Ok(plan) = Planner::build(&s, ins) {
+                println!("\n--- Generated Dockerfile Preview ---");
+                println!("{}", Renderer::dockerfile(&plan));
+                println!("--- Generated Compose Preview ---");
+                println!("{}", Renderer::compose(&plan));
             }
         }
     }
 
     fn run_generate(&mut self) {
         let root = self.settings.as_ref().map(|s| s.target.root.clone()).unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        if let Ok(target) = target_for_path(&root) {
-            let s = Settings::new(target);
-            if let Ok(ins) = Inspector::inspect(&s.target, None) {
-                if let Ok(plan) = Planner::build(&s, ins) {
-                    let lock = ProjectLock::acquire(&root);
-                    if lock.is_err() {
-                        println!("Failed to acquire project lock!");
-                        return;
-                    }
-                    let res = OutputManager::write_plan(&root, &Renderer::dockerfile(&plan), &Renderer::compose(&plan));
-                    match res {
-                        Ok(()) => println!("Successfully generated Dockerfile and docker-compose.yml!"),
-                        Err(e) => println!("Failed to write files: {}", e),
-                    }
+        let s = if let Some(ref cur) = self.settings {
+            cur.clone()
+        } else if let Ok(target) = target_for_path(&root) {
+            Settings::new(target)
+        } else {
+            println!("  [ERROR] Invalid target path");
+            return;
+        };
+        if let Ok(ins) = Inspector::inspect(&s.target, None) {
+            if let Ok(plan) = Planner::build(&s, ins) {
+                let lock = ProjectLock::acquire(&root);
+                if lock.is_err() {
+                    println!("Failed to acquire project lock!");
+                    return;
+                }
+                let res = OutputManager::write_plan(&root, &Renderer::dockerfile(&plan), &Renderer::compose(&plan));
+                match res {
+                    Ok(()) => println!("Successfully generated Dockerfile and docker-compose.yml!"),
+                    Err(e) => println!("Failed to write files: {}", e),
                 }
             }
         }
     }
 
     fn run_deployment_plan(&mut self) {
-        println!("\nPhased Deployment Plan:");
-        println!("  Phase 1: Build base & runtime image");
-        println!("  Phase 2: Launch auxiliary dependencies");
-        println!("  Phase 3: Launch application container & run AppSmoke probe");
+        let root = self.settings.as_ref().map(|s| s.target.root.clone()).unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let s = if let Some(ref cur) = self.settings {
+            cur.clone()
+        } else if let Ok(target) = target_for_path(&root) {
+            Settings::new(target)
+        } else {
+            println!("  [ERROR] Invalid target path");
+            return;
+        };
+        if let Ok(ins) = Inspector::inspect(&s.target, None) {
+            if let Ok(plan) = Planner::build(&s, ins) {
+                let host = DockerHostProbe::probe();
+                let acc = AcceleratorPolicy::probe();
+                println!("\n================================================================================");
+                println!("AUTO DOCKER — PHASED DEPLOYMENT PLAN");
+                println!("================================================================================");
+                println!("Target Root    : {}", plan.inspection.root.display());
+                println!("Entrypoint     : {}", plan.inspection.entry.rel_path);
+                println!("Mode           : {}", plan.mode.as_str());
+                println!("Base Image     : {}", plan.python_image);
+                println!("GPU Required   : {}", plan.gpu);
+                println!("Docker Status  : {}", host.summary());
+                println!("Accelerator    : {}", acc.details);
+                println!("--------------------------------------------------------------------------------");
+                println!("Phase 1: Build base & runtime image ({})", plan.python_image);
+                println!("Phase 2: Launch auxiliary dependencies ({})", if plan.services.is_empty() { "None (Standalone)" } else { "Active" });
+                println!("Phase 3: Launch application container & run Healthcheck probe");
+                println!("--------------------------------------------------------------------------------");
+            }
+        }
     }
 
     fn run_stage_deployment(&mut self) {
+        let root = self.settings.as_ref().map(|s| s.target.root.clone()).unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let readiness = NativeReadiness::evaluate(&root);
         println!("\nReview Preflight & Stage Deployment:");
-        println!("  All preflight checks evaluated. Ready to deploy.");
+        println!("--------------------------------------------------------------------------------");
+        if readiness.ready() {
+            println!("  [PASS] All preflight checks passed. Ready to deploy.");
+        } else {
+            println!("  [WARN] Preflight checks detected warnings/blockers:");
+            for f in &readiness.findings {
+                println!("    - [{}] {}: {}", f.level, f.category, f.message);
+            }
+        }
+        for note in &readiness.notes {
+            println!("  Note: {}", note);
+        }
+        println!("--------------------------------------------------------------------------------");
     }
 
     fn run_doctor(&mut self) {
@@ -3906,7 +4006,8 @@ pub fn print_service_mesh(plan: &Plan) {
         } else {
             format!("http://localhost:{}", p.host)
         };
-        println!(" {:<12} {:<24} {:<16} {}", p.service, role, "RUNNING (healthy)", url);
+        let status = if DockerHostProbe::probe().cli_installed { "STARTED" } else { "CONFIGURED" };
+        println!(" {:<12} {:<24} {:<16} {}", p.service, role, status, url);
     }
     println!("--------------------------------------------------------------------------------");
     println!(" Internal Network : Docker bridge with service discovery (DNS active)");
@@ -3947,25 +4048,80 @@ pub fn print_usage() {
 }
 
 pub fn run_cli(args: &[String]) -> Result<(), OpsError> {
-    if args.is_empty() {
-        let mut console = Console::new(None);
-        console.run_interactive();
-        return Ok(());
+    let mut command: Option<String> = None;
+    let mut project_path: Option<PathBuf> = None;
+    let mut force_gpu = false;
+    let mut force_mode: Option<Mode> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "help" | "--help" | "-h" => {
+                print_usage();
+                return Ok(());
+            }
+            "--project" => {
+                if i + 1 < args.len() {
+                    project_path = Some(PathBuf::from(&args[i + 1]));
+                    i += 1;
+                }
+            }
+            "--gpu" => {
+                force_gpu = true;
+            }
+            "--mode" => {
+                if i + 1 < args.len() {
+                    force_mode = match args[i + 1].to_lowercase().as_str() {
+                        "fastapi" => Some(Mode::FastApi),
+                        "flask" => Some(Mode::Flask),
+                        "streamlit" => Some(Mode::Streamlit),
+                        "gradio" => Some(Mode::Gradio),
+                        "web" => Some(Mode::Web),
+                        "mlops" => Some(Mode::Mlops),
+                        "llmops" => Some(Mode::Llmops),
+                        "genaiops" => Some(Mode::Genaiops),
+                        "auto" => Some(Mode::Auto),
+                        _ => Some(Mode::Base),
+                    };
+                    i += 1;
+                }
+            }
+            subcmd if !subcmd.starts_with('-') && command.is_none() => {
+                command = Some(subcmd.to_string());
+            }
+            _ => {}
+        }
+        i += 1;
     }
 
-    let cmd = &args[0];
-    match cmd.as_str() {
-        "help" | "--help" | "-h" => {
-            print_usage();
-            Ok(())
+    let cwd = project_path.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let target = target_for_path(&cwd)?;
+    let mut settings = Settings::new(target);
+    if force_gpu {
+        settings.gpu = true;
+    }
+    if let Some(m) = force_mode {
+        settings.mode = m;
+    }
+
+    let cmd = match command {
+        None => {
+            let mut console = Console::new(Some(settings));
+            console.run_interactive();
+            return Ok(());
         }
+        Some(c) => c,
+    };
+
+    match cmd.as_str() {
         "smart" => {
-            let mut console = Console::new(None);
+            let mut console = Console::new(Some(settings));
             console.run_smart_flow();
             Ok(())
         }
         "doctor" => {
-            let mut console = Console::new(None);
+            let mut console = Console::new(Some(settings));
             console.run_doctor();
             Ok(())
         }
@@ -3974,27 +4130,27 @@ pub fn run_cli(args: &[String]) -> Result<(), OpsError> {
             Ok(())
         }
         "plan" | "generate" | "build" | "up" | "down" | "clean" | "verify" => {
-            let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let target = target_for_path(&cwd)?;
-            let settings = Settings::new(target);
             let mut console = Console::new(Some(settings));
             match cmd.as_str() {
                 "plan" => console.run_preview(),
                 "generate" => console.run_generate(),
                 "build" => {
-                    let _ = DockerAdapter::build(&cwd, "auto-docker-app:latest", "Dockerfile")?;
+                    let df = if cwd.join(".opsforge/Dockerfile").is_file() { ".opsforge/Dockerfile" } else { "Dockerfile" };
+                    let _ = DockerAdapter::build(&cwd, "auto-docker-app:latest", df)?;
                     println!("Build complete.");
                 }
                 "up" => {
                     let s = console.settings.as_ref().unwrap();
                     let inspection = Inspector::inspect(&s.target, s.explicit_entry.as_deref())?;
                     let plan = Planner::build(&console.settings.as_ref().unwrap(), inspection)?;
-                    let _ = DockerAdapter::compose_up(&cwd, "docker-compose.yml", true)?;
+                    let comp = if cwd.join(".opsforge/compose.yaml").is_file() { ".opsforge/compose.yaml" } else { "docker-compose.yml" };
+                    let _ = DockerAdapter::compose_up(&cwd, comp, true)?;
                     println!("Containers started successfully.");
                     print_service_mesh(&plan);
                 }
                 "down" => {
-                    let _ = DockerAdapter::compose_down(&cwd, "docker-compose.yml", true)?;
+                    let comp = if cwd.join(".opsforge/compose.yaml").is_file() { ".opsforge/compose.yaml" } else { "docker-compose.yml" };
+                    let _ = DockerAdapter::compose_down(&cwd, comp, true)?;
                     println!("Containers stopped.");
                 }
                 "clean" => console.run_cleaner(),

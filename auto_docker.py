@@ -607,9 +607,32 @@ def target_for(raw: str, base: Path | None = None) -> Target:
         root, pinned = path, None
     else:
         raise OpsError("The selected path is not a regular file/directory.")
-    if root == Path.home().resolve() or root == Path(root.anchor):
+    resolved_root = root.resolve()
+    if resolved_root == Path.home().resolve() or resolved_root == Path(resolved_root.anchor):
         raise OpsError("Refusing to use a home/drive-root directory. Select a project subfolder.")
+    root_str = str(resolved_root).lower().replace("\\", "/")
+    dangerous_subpaths = (
+        "/etc", "/var", "/usr", "/bin", "/sbin", "/sys", "/proc", "/dev", "/boot",
+        "/windows", "/program files", "/program files (x86)", "/system32"
+    )
+    if any(root_str == d or root_str.startswith(f"{d}/") for d in dangerous_subpaths):
+        raise OpsError(f"Refusing system directory '{resolved_root}'. Select an application project folder.")
     return Target(root, pinned)
+
+
+def _safe_which(cmd: str) -> str | None:
+    path = shutil.which(cmd)
+    if not path:
+        return None
+    try:
+        resolved = Path(path).resolve()
+        if sys.platform == "win32":
+            cwd = Path.cwd().resolve()
+            if resolved.parent == cwd:
+                return None
+    except Exception:
+        pass
+    return path
 
 
 def _collect_python(root: Path) -> list[Path]:
@@ -2396,12 +2419,28 @@ class Renderer:
             "FROM ${PYTHON_IMAGE} AS runtime\n"
             "ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/app PATH=/opt/venv/bin:$PATH\n"
             "WORKDIR /app\n"
-            "RUN groupadd --system app && useradd --system --gid app --create-home --home-dir /home/app app && chown app:app /app\n"
-            "ENV HOME=/home/app\n"
-            "COPY --from=builder /opt/venv /opt/venv\n"
-            "COPY --chown=app:app . /app\n"
-            "USER app\n"
-            f"{expose}"
+            + (
+                "RUN addgroup -S app && adduser -S app -G app && chown app:app /app\n"
+                "ENV HOME=/home/app\n"
+                "COPY --from=builder /opt/venv /opt/venv\n"
+                "COPY --chown=app:app . /app\n"
+                "USER app\n"
+                if "alpine" in base
+                else (
+                    "COPY --from=builder /opt/venv /opt/venv\n"
+                    "COPY . /app\n"
+                    "USER nonroot\n"
+                    if ("distroless" in base or "chainguard" in base)
+                    else (
+                        "RUN groupadd --system app && useradd --system --gid app --create-home --home-dir /home/app app && chown app:app /app\n"
+                        "ENV HOME=/home/app\n"
+                        "COPY --from=builder /opt/venv /opt/venv\n"
+                        "COPY --chown=app:app . /app\n"
+                        "USER app\n"
+                    )
+                )
+            )
+            + f"{expose}"
             f"CMD {json.dumps(list(plan.command), ensure_ascii=False)}\n"
         )
         slug = re.sub(r"[^a-z0-9-]", "-", i.root.name.lower()).strip("-")[:24] or "project"
@@ -2416,6 +2455,7 @@ class Renderer:
             "cap_drop": ["ALL"],
             "stop_grace_period": "30s",
             "environment": {"PYTHONUNBUFFERED": "1"},
+            "logging": {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}},
         }
         if plan.persistent_dirs:
             app["volumes"] = [f"../{d}:/app/{d}" for d in plan.persistent_dirs]
@@ -2611,6 +2651,21 @@ class Renderer:
 **/secrets.*
 **/*.p12
 **/*.pfx
+**/*.token
+**/token.json
+**/service-account*.json
+**/service_account*.json
+**/kubeconfig
+**/.kube
+**/.docker/config.json
+**/terraform.tfstate
+**/terraform.tfstate.*
+**/.terraform
+**/*.keystore
+**/.gcloud
+**/.config/gcloud
+**/*.sqlite3
+**/*.db
 # Large ML/LLM weights stay on the host; mount data explicitly if needed.
 **/*.gguf
 **/*.safetensors
@@ -3667,7 +3722,7 @@ class ExistingInfrastructure:
         if action in {'build', 'up', 'down'}:
             orch.transition(DeploymentState.APPROVED, f"Operator approved native {action}")
 
-        docker = shutil.which('docker')
+        docker = _safe_which('docker')
         if not docker:
             orch.transition(DeploymentState.BLOCKED, "Docker CLI unavailable on host")
             if action == 'check':
@@ -3694,7 +3749,7 @@ class ExistingInfrastructure:
             if not engine_ok:
                 orch.transition(DeploymentState.BLOCKED, "Docker Engine unavailable: " + detail)
                 raise OpsError('Docker Engine unavailable: ' + detail)
-            suffix = {'build': ['build'], 'up': ['up', '-d', '--no-build'],
+            suffix = {'build': ['build'], 'up': ['up', '-d', '--build'],
                       'down': ['down'], 'ps': ['ps'], 'logs': ['logs', '--tail', '80'],
                       'verify': ['ps', '--all', '--format', 'json']}[action]
             command = [*compose, *suffix]
@@ -3707,7 +3762,7 @@ class ExistingInfrastructure:
         if action == 'build':
             orch.transition(DeploymentState.BUILDING, "Executing docker compose build")
         elif action == 'up':
-            orch.transition(DeploymentState.STARTING, "Executing docker compose up -d --no-build")
+            orch.transition(DeploymentState.STARTING, "Executing docker compose up -d --build")
 
         # Capture output for check and verify to preserve diagnostics
         capture = (action in {'check', 'verify'})
@@ -4101,7 +4156,7 @@ class DockerHostProbe:
 
     @classmethod
     def probe(cls, context: str | None = None, timeout: float = 1.5) -> DockerHostStatus:
-        docker_cli = shutil.which("docker")
+        docker_cli = _safe_which("docker")
         if not docker_cli:
             return DockerHostStatus(
                 cli_installed=False,
@@ -4392,7 +4447,7 @@ class DockerAdapter:
         self.context = self.validate_context(docker_context)
 
     def _docker(self) -> str:
-        command = shutil.which("docker")
+        command = _safe_which("docker")
         if not command:
             detail = ("Docker CLI unavailable inside Flatpak. Run 'doctor' to inspect host Docker; "
                       "remote contexts also require an accessible CLI in this environment."
@@ -4480,14 +4535,16 @@ class DockerAdapter:
         return hints
 
     def get_logs(self, service: str | None = None, tail: int = 25) -> str:
-        """Fetch recent non-color log lines for forensic crash analysis."""
+        """Fetch recent non-color log lines for forensic crash analysis, sanitized against terminal injection."""
         args = ['logs', f'--tail={tail}', '--no-color']
         if service:
             args.append(service)
         try:
             res = subprocess.run(self._compose_command(*args), cwd=self.root,
                                  capture_output=True, text=True, check=False, timeout=10)
-            return (res.stdout or res.stderr or '').strip()
+            raw = (res.stdout or res.stderr or '').strip()
+            sanitized = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', raw)
+            return "".join(ch for ch in sanitized if ch in ('\n', '\t', '\r') or (32 <= ord(ch) <= 126))
         except Exception as exc:
             return f"(Could not retrieve container logs: {exc})"
 
@@ -5760,9 +5817,22 @@ class Console:
                         pass
                     print("\nBuilding container image...")
                     adapter.run("build")
+                    if plan.execution_kind == "interactive":
+                        print("\nInteractive CLI application container is built and ready.")
+                        print("To start an interactive terminal session with stdin/stdout attached, run:")
+                        print(f"  docker compose -f {adapter.compose_file} run --rm app")
+                        self.smart_stage = "result"
+                        return
+
                     print("\nStarting container services...")
                     adapter.run("up")
                     ok, rows = adapter.verify()
+                    if not ok and any("starting" in r.lower() for r in rows):
+                        for _ in range(3):
+                            time.sleep(2.0)
+                            ok, rows = adapter.verify()
+                            if ok or not any("starting" in r.lower() for r in rows):
+                                break
                     has_unverified = any("no healthcheck" in r for r in rows)
                     if not ok:
                         print("\nDEPLOYMENT DEGRADED: One or more containers failed or exited.")
@@ -5793,6 +5863,7 @@ class Console:
 
                     # Print Live Service Mesh & Access URLs Dashboard
                     if ok:
+                        status_str = "RUNNING (unverified)" if has_unverified else "RUNNING (healthy)"
                         published = {p.service: p for p in plan.published_ports}
                         print("\n" + "=" * 80)
                         print("AUTO DOCKER 3.0 — LIVE SERVICE MESH & ACCESS URLS")
@@ -5802,13 +5873,13 @@ class Console:
                         if plan.port and 'app' in published:
                             app_role = {"fastapi": "FastAPI Web Service", "flask": "Flask Web Service",
                                         "streamlit": "Streamlit App", "gradio": "Gradio UI"}.get(plan.inspection.entry.framework, "Application Service")
-                            print(f" {'app':<12} {app_role:<24} {'RUNNING (healthy)':<16} http://localhost:{published['app'].host}")
+                            print(f" {'app':<12} {app_role:<24} {status_str:<16} http://localhost:{published['app'].host}")
                         if "mlflow" in plan.services and "mlflow" in published:
-                            print(f" {'mlflow':<12} {'MLOps Experiment UI':<24} {'RUNNING (healthy)':<16} http://localhost:{published['mlflow'].host}")
+                            print(f" {'mlflow':<12} {'MLOps Experiment UI':<24} {status_str:<16} http://localhost:{published['mlflow'].host}")
                         if "ollama" in plan.services and "ollama" in published:
-                            print(f" {'ollama':<12} {'Local LLM API Server':<24} {'RUNNING (healthy)':<16} http://localhost:{published['ollama'].host}")
+                            print(f" {'ollama':<12} {'Local LLM API Server':<24} {status_str:<16} http://localhost:{published['ollama'].host}")
                         if "redis" in plan.services and "redis" in published:
-                            print(f" {'redis':<12} {'In-Memory Cache':<24} {'RUNNING (healthy)':<16} localhost:{published['redis'].host}")
+                            print(f" {'redis':<12} {'In-Memory Cache':<24} {status_str:<16} localhost:{published['redis'].host}")
                         print("-" * 80)
                         print(" Internal Network : Docker bridge with service discovery (DNS active)")
                         if "mlflow" in plan.services:
@@ -7319,7 +7390,7 @@ class Console:
                 print(f"Repository Root    : {root}")
                 print(f"Selected Compose   : {stack.selected_compose}")
                 print(f"Risk Classification: {plan.risk_classification}")
-                print(f"Planned Action     : docker compose {action}" + (" -d --no-build" if action == "up" else ""))
+                print(f"Planned Action     : docker compose {action}" + (" -d --build" if action == "up" else ""))
                 print(f"Services ({len(plan.services)})     : {', '.join(s.name for s in plan.services)}")
                 if plan.published_ports:
                     ports_str = ', '.join(f"{p.service}:{p.host}->{p.container}" for p in plan.published_ports)
