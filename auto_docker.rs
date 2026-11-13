@@ -425,6 +425,7 @@ pub struct Settings {
     pub services_override: Option<Vec<String>>,
     pub command_override: Option<Vec<String>>,
     pub health_path: Option<String>,
+    pub python_image: Option<String>,
 }
 
 impl Settings {
@@ -445,6 +446,7 @@ impl Settings {
             services_override: None,
             command_override: None,
             health_path: Some("/health".to_string()),
+            python_image: None,
         }
     }
 }
@@ -1841,7 +1843,13 @@ impl Planner {
             inferred_packages,
             execution_kind,
             health_path: settings.health_path.clone(),
-            python_image: "python:3.12-slim-bookworm".to_string(),
+            python_image: settings.python_image.clone().unwrap_or_else(|| {
+                if settings.gpu {
+                    "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime".to_string()
+                } else {
+                    "python:3.12-slim-bookworm".to_string()
+                }
+            }),
             persistent_dirs,
             replicas: settings.replicas,
             cpus: settings.cpus.clone(),
@@ -3312,13 +3320,22 @@ impl SmartDecisionEngine {
         let default_target = target_for_path(root)?;
         let target = settings.map(|s| s.target.clone()).unwrap_or(default_target);
 
-        let default_settings = Settings::new(target);
+        let mut default_settings = Settings::new(target);
+        // SMART Mode simplicity rule: default to 1 clean container (app)
+        default_settings.services_override = Some(Vec::new());
         let active_settings = settings.unwrap_or(&default_settings);
 
         let inspection = Inspector::inspect(&active_settings.target, active_settings.explicit_entry.as_deref())?;
         let plan = Planner::build(active_settings, inspection.clone()).ok();
 
         let mut confidence = Vec::new();
+        if let Some(ref p) = plan {
+            if p.services.is_empty() {
+                confidence.push(("Container Architecture".to_string(), "CONFIRMED".to_string(), "Single Standalone Container (app) [Clean & Simple]".to_string()));
+            } else {
+                confidence.push(("Container Architecture".to_string(), "CONFIRMED".to_string(), format!("Multi-Container Service Mesh: app, {}", p.services.join(", "))));
+            }
+        }
         confidence.push(("Entrypoint".to_string(), "CONFIRMED".to_string(), format!("Selected {}", inspection.entry.path.display())));
         confidence.push(("Framework".to_string(), "CONFIRMED".to_string(), format!("{:?}", inspection.detected_mode)));
         if inspection.entry.optional_imports.is_empty() {
@@ -3697,10 +3714,16 @@ impl Console {
 
     fn run_customize_settings(&mut self) {
         println!("\nCustomize Settings:");
-        println!("  Toggle GPU acceleration, override execution mode (Base/FastAPI/Streamlit/MLOps).");
+        println!("  Toggle GPU acceleration and base image flavor (Slim, Alpine, Full, GPU).");
         if let Some(ref mut s) = self.settings {
             s.gpu = !s.gpu;
-            println!("  GPU acceleration toggled to: {}", s.gpu);
+            if s.gpu {
+                s.python_image = Some("pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime".to_string());
+                println!("  GPU acceleration toggled ON. Base image: PyTorch CUDA (pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime).");
+            } else {
+                s.python_image = Some("python:3.12-slim-bookworm".to_string());
+                println!("  GPU acceleration toggled OFF. Base image: Python 3.12 Slim (python:3.12-slim-bookworm).");
+            }
         } else {
             println!("  Please select a project first with option 1.");
         }

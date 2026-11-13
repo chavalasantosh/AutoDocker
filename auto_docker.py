@@ -4989,8 +4989,15 @@ class SmartDecisionEngine:
         # Case 2: Standard Python Project Discovery & Planning
         target = Target(resolved_root, settings.target.pinned if settings else None)
         inspection = Inspector().inspect(target, settings.entry if settings else None)
-        effective_settings = settings or Settings(target)
+        # SMART Mode simplicity rule: default to 1 clean container (app)
+        effective_settings = settings or Settings(target, services_override=())
         plan = Planner().build(effective_settings, inspection)
+
+        # Architecture
+        if not plan.services:
+            confidence_findings.append(("Container Architecture", "CONFIRMED", "Single Standalone Container (app) [Clean & Simple]"))
+        else:
+            confidence_findings.append(("Container Architecture", "CONFIRMED", f"Multi-Container Service Mesh: app, {', '.join(plan.services)}"))
 
         # Language and framework
         if inspection.entry.framework != "python":
@@ -5945,8 +5952,9 @@ class Console:
         print(f" [8] Security Policy  : {'ALLOW INSECURE' if self.allow_insecure else 'BLOCK CRITICAL'}")
         print(f" [9] Scale (Replicas) : {getattr(self.settings, 'replicas', 1)}")
         print(f"[10] Resource Limits  : CPUs={getattr(self.settings, 'cpus', None) or 'unlimited'}, Memory={getattr(self.settings, 'memory', None) or 'unlimited'}")
+        print(f"[11] Base Image Flavor: {self.settings.python_image or 'python:3.12-slim-bookworm (default slim)'}")
         print("-" * 80)
-        print("Quick Actions: enter [1-10] to customize, or direct command ('replicas 3', 'resources cpus=2 memory=4G').")
+        print("Quick Actions: enter [1-11] to customize, or direct command ('replicas 3', 'resources cpus=2 memory=4G').")
         print("Enter '0', 'b', or 'done' to return to Main Menu.")
         print("=" * 80)
 
@@ -6002,6 +6010,33 @@ class Console:
                     self.execute(f"hostport app {parts[0]}")
             self.settings_stage = "main"
             self.render_settings()
+            return True
+
+        if self.settings_stage == "image":
+            if cmd in {"0", "b", "back", "cancel"}:
+                self.settings_stage = "main"
+                self.render_settings()
+                return True
+            flavors = {
+                "1": "python:3.12-slim-bookworm",
+                "2": "python:3.12-alpine",
+                "3": "python:3.12-bookworm",
+                "4": "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime",
+                "5": "python:3.11-slim-bookworm",
+                "6": "python:3.10-slim-bookworm",
+                "slim": "python:3.12-slim-bookworm",
+                "alpine": "python:3.12-alpine",
+                "full": "python:3.12-bookworm",
+                "gpu": "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime",
+            }
+            chosen = flavors.get(cmd, line.strip() if ("/" in line or ":" in line) else None)
+            if chosen:
+                self._set(python_image=chosen)
+                print(f"Base image set to: {chosen}")
+                self.settings_stage = "main"
+                self.render_settings()
+                return True
+            print("Invalid choice. Select [1-6] or enter a custom image name (or '0' to cancel).")
             return True
 
         if cmd == "1":
@@ -6068,6 +6103,18 @@ class Console:
             next_mem = cycle[(cycle.index(curr_mem) + 1) % len(cycle)] if curr_mem in cycle else None
             self._set(memory=next_mem)
             self.render_settings()
+            return True
+        if cmd in {"11", "image", "flavor", "base"}:
+            print("\nSelect Base Image Flavor:")
+            print("  [1] Slim (Recommended, ~140MB - Debian minimal fast)")
+            print("  [2] Alpine (Ultra-light, ~45MB - Minimal musl microservice)")
+            print("  [3] Full Debian (Build-ready with gcc/g++ for C-extensions)")
+            print("  [4] GPU / CUDA (PyTorch 2.3 + CUDA 12.1 runtime)")
+            print("  [5] Python 3.11 Slim (python:3.11-slim-bookworm)")
+            print("  [6] Python 3.10 Slim (python:3.10-slim-bookworm)")
+            print("  Or enter any custom Docker image (e.g. python:3.13-rc-slim)")
+            print("Type number [1-6] or image name:")
+            self.settings_stage = "image"
             return True
 
         res = self.execute(line)
