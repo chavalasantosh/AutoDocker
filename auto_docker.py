@@ -409,14 +409,30 @@ def classify_service_role(name: str, image: str | None, build: str | None, resta
     return 'service'
 
 
+def _strip_yaml_comment(line: str) -> str:
+    in_single = False
+    in_double = False
+    for i, ch in enumerate(line):
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == '#' and not in_single and not in_double:
+            return line[:i].rstrip()
+    return line.rstrip()
+
+
 def parse_compose_services_static(data: str) -> dict[str, dict[str, Any]]:
     services: dict[str, dict[str, Any]] = {}
     current_service: dict[str, Any] | None = None
     current_section: str | None = None
     in_services = False
+    service_indent: int | None = None
+    section_indent: int | None = None
+    current_volume_dict: dict[str, str] | None = None
 
     for raw_line in data.splitlines():
-        line = raw_line.split('#', 1)[0].rstrip()
+        line = _strip_yaml_comment(raw_line)
         if not line:
             continue
         indent = len(line) - len(line.lstrip())
@@ -425,15 +441,23 @@ def parse_compose_services_static(data: str) -> dict[str, dict[str, Any]]:
         if indent == 0:
             if trimmed.startswith('services:'):
                 in_services = True
+                service_indent = None
             else:
                 in_services = False
             current_service = None
+            current_section = None
+            section_indent = None
             continue
 
         if not in_services:
             continue
 
-        if indent == 2 and trimmed.endswith(':'):
+        # Detect service indent level dynamically (supports 2, 4, or any uniform spaces)
+        if service_indent is None and trimmed.endswith(':') and not trimmed.startswith('-'):
+            service_indent = indent
+
+        # A service definition at service_indent
+        if service_indent is not None and indent == service_indent and trimmed.endswith(':') and not trimmed.startswith('-'):
             svc_name = trimmed[:-1].strip('\'"')
             current_service = {
                 'name': svc_name,
@@ -454,19 +478,26 @@ def parse_compose_services_static(data: str) -> dict[str, dict[str, Any]]:
             }
             services[svc_name] = current_service
             current_section = None
+            section_indent = None
+            current_volume_dict = None
             continue
 
-        if not current_service:
+        if not current_service or service_indent is None or indent <= service_indent:
             continue
 
-        if indent == 4:
+        # Service-level properties (e.g. image, ports, build)
+        if section_indent is None or indent <= section_indent:
             if trimmed.endswith(':'):
                 current_section = trimmed[:-1].strip('\'"')
+                section_indent = indent
+                current_volume_dict = None
             elif ':' in trimmed:
                 k, _, v = trimmed.partition(':')
                 k = k.strip('\'"')
                 v = v.strip().strip('\'"')
                 current_section = None
+                section_indent = None
+                current_volume_dict = None
                 if k == 'image':
                     current_service['image'] = v
                 elif k == 'build':
@@ -482,10 +513,27 @@ def parse_compose_services_static(data: str) -> dict[str, dict[str, Any]]:
                 elif k == 'privileged':
                     current_service['privileged'] = (v.lower() == 'true')
                 elif k == 'env_file':
-                    current_service['env_file'].append(v)
+                    if v.startswith('[') and v.endswith(']'):
+                        for val in [x.strip().strip('\'"') for x in v[1:-1].split(',') if x.strip()]:
+                            current_service['env_file'].append(val)
+                    else:
+                        current_service['env_file'].append(v)
+                elif k == 'ports':
+                    if v.startswith('[') and v.endswith(']'):
+                        for val in [x.strip().strip('\'"') for x in v[1:-1].split(',') if x.strip()]:
+                            current_service['ports'].append(val)
+                elif k == 'volumes':
+                    if v.startswith('[') and v.endswith(']'):
+                        for val in [x.strip().strip('\'"') for x in v[1:-1].split(',') if x.strip()]:
+                            current_service['volumes'].append(val)
+                elif k == 'depends_on':
+                    if v.startswith('[') and v.endswith(']'):
+                        for val in [x.strip().strip('\'"') for x in v[1:-1].split(',') if x.strip()]:
+                            current_service['depends_on'].append(val)
             continue
 
-        if indent >= 6 and current_section:
+        # Sub-items within a section (indent > section_indent)
+        if current_section:
             if trimmed.startswith('-'):
                 val = trimmed[1:].strip().strip('\'"')
                 if current_section == 'command':
@@ -501,7 +549,10 @@ def parse_compose_services_static(data: str) -> dict[str, dict[str, Any]]:
                 elif current_section == 'ports':
                     current_service['ports'].append(val)
                 elif current_section == 'volumes':
-                    current_service['volumes'].append(val)
+                    if ':' in val and not val.startswith('type:'):
+                        current_service['volumes'].append(val)
+                    elif val.startswith('type:'):
+                        current_volume_dict = {}
                 elif current_section == 'depends_on':
                     current_service['depends_on'].append(val)
                 elif current_section == 'env_file':
@@ -510,7 +561,7 @@ def parse_compose_services_static(data: str) -> dict[str, dict[str, Any]]:
                     current_service['environment'].append(val)
                 elif current_section == 'profiles':
                     current_service['profiles'].append(val)
-            elif ':' in trimmed and current_section == 'depends_on' and indent == 6:
+            elif ':' in trimmed and current_section == 'depends_on':
                 dep_name = trimmed.partition(':')[0].strip('\'"')
                 current_service['depends_on'].append(dep_name)
             elif ':' in trimmed and current_section == 'environment':
@@ -524,8 +575,124 @@ def parse_compose_services_static(data: str) -> dict[str, dict[str, Any]]:
                     current_service['build'] = v
                 elif k == 'dockerfile':
                     current_service['dockerfile'] = v
+            elif ':' in trimmed and current_section == 'volumes':
+                k, _, v = trimmed.partition(':')
+                k = k.strip('\'"')
+                v = v.strip().strip('\'"')
+                if current_volume_dict is not None:
+                    if k in ('source', 'target'):
+                        current_volume_dict[k] = v
+                        if 'source' in current_volume_dict and 'target' in current_volume_dict:
+                            vol_str = f"{current_volume_dict['source']}:{current_volume_dict['target']}"
+                            if vol_str not in current_service['volumes']:
+                                current_service['volumes'].append(vol_str)
 
     return services
+
+
+def parse_compose_services_authoritative(root: Path, compose_files: tuple[str, ...] | list[str]) -> dict[str, dict[str, Any]] | None:
+    docker_bin = _safe_which("docker")
+    if not docker_bin or not compose_files:
+        return None
+    try:
+        cmd = [docker_bin, "compose"]
+        for cf in compose_files:
+            cmd.extend(["-f", cf])
+        cmd.extend(["config", "--format", "json"])
+        proc = subprocess.run(
+            cmd,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None
+        cfg = json.loads(proc.stdout)
+        raw_services = cfg.get("services", {})
+        if not isinstance(raw_services, dict):
+            return None
+        services: dict[str, dict[str, Any]] = {}
+        for sname, sinfo in raw_services.items():
+            if not isinstance(sinfo, dict):
+                continue
+            b_info = sinfo.get("build")
+            b_context = None
+            b_dockerfile = None
+            if isinstance(b_info, str):
+                b_context = b_info
+            elif isinstance(b_info, dict):
+                b_context = b_info.get("context")
+                b_dockerfile = b_info.get("dockerfile")
+
+            ports: list[str] = []
+            for p in sinfo.get("ports", []):
+                if isinstance(p, str):
+                    ports.append(p)
+                elif isinstance(p, dict):
+                    pub = p.get("published")
+                    tgt = p.get("target")
+                    if pub and tgt:
+                        ports.append(f"{pub}:{tgt}")
+                    elif tgt:
+                        ports.append(str(tgt))
+
+            volumes: list[str] = []
+            for v in sinfo.get("volumes", []):
+                if isinstance(v, str):
+                    volumes.append(v)
+                elif isinstance(v, dict):
+                    src = v.get("source")
+                    tgt = v.get("target")
+                    if src and tgt:
+                        ro = ":ro" if v.get("read_only") else ""
+                        volumes.append(f"{src}:{tgt}{ro}")
+                    elif tgt:
+                        volumes.append(str(tgt))
+
+            deps: list[str] = []
+            dep_obj = sinfo.get("depends_on", [])
+            if isinstance(dep_obj, list):
+                deps.extend(str(d) for d in dep_obj)
+            elif isinstance(dep_obj, dict):
+                deps.extend(str(d) for d in dep_obj.keys())
+
+            envs: list[str] = []
+            env_obj = sinfo.get("environment", [])
+            if isinstance(env_obj, list):
+                for e in env_obj:
+                    envs.append(str(e).partition("=")[0])
+            elif isinstance(env_obj, dict):
+                envs.extend(str(k) for k in env_obj.keys())
+
+            cmd_val = sinfo.get("command")
+            if isinstance(cmd_val, list):
+                cmd_val = " ".join(str(c) for c in cmd_val)
+            entry_val = sinfo.get("entrypoint")
+            if isinstance(entry_val, list):
+                entry_val = " ".join(str(e) for e in entry_val)
+
+            services[sname] = {
+                'name': sname,
+                'image': sinfo.get("image"),
+                'build': b_context,
+                'dockerfile': b_dockerfile,
+                'command': cmd_val,
+                'entrypoint': entry_val,
+                'ports': ports,
+                'volumes': volumes,
+                'depends_on': deps,
+                'env_file': [str(f) for f in sinfo.get("env_file", [])] if isinstance(sinfo.get("env_file"), list) else [],
+                'environment': envs,
+                'restart': sinfo.get("restart"),
+                'profiles': [str(p) for p in sinfo.get("profiles", [])] if isinstance(sinfo.get("profiles"), list) else [],
+                'privileged': bool(sinfo.get("privileged")),
+                'network_mode': sinfo.get("network_mode"),
+            }
+        return services
+    except Exception:
+        return None
 
 
 def topological_sort_services(services: dict[str, list[str]]) -> tuple[list[str], list[str]]:
@@ -1115,6 +1282,49 @@ IMPORT_PACKAGES: dict[str, str] = {
     "structlog": "structlog",
     "boto3": "boto3",
     "botocore": "botocore",
+    # Enterprise Messaging, Queues & Distributed Tasks
+    "kafka": "kafka-python",
+    "confluent_kafka": "confluent-kafka",
+    "pika": "pika",
+    "kombu": "kombu",
+    "rq": "rq",
+    "dramatiq": "dramatiq",
+    "nats": "nats-py",
+    # Enterprise Databases, ORMs & Drivers
+    "pyodbc": "pyodbc",
+    "oracledb": "oracledb",
+    "cx_Oracle": "cx-Oracle",
+    "sqlmodel": "sqlmodel",
+    "tortoise": "tortoise-orm",
+    "peewee": "peewee",
+    "neo4j": "neo4j",
+    "cassandra": "cassandra-driver",
+    "duckdb": "duckdb",
+    "opensearchpy": "opensearch-py",
+    # Vector Databases & Search
+    "weaviate": "weaviate-client",
+    "pinecone": "pinecone-client",
+    "pymilvus": "pymilvus",
+    # Cloud Storage & Object Stores
+    "minio": "minio",
+    "s3fs": "s3fs",
+    "gcsfs": "gcsfs",
+    # Observability, APM & Sentry
+    "sentry_sdk": "sentry-sdk",
+    "opentelemetry": "opentelemetry-api",
+    "datadog": "datadog",
+    "newrelic": "newrelic",
+    # Automation, Web Scraping & Protocols
+    "scrapy": "Scrapy",
+    "playwright": "playwright",
+    "selenium": "selenium",
+    "paramiko": "paramiko",
+    "fabric": "fabric",
+    "netmiko": "netmiko",
+    "grpc": "grpcio",
+    # Testing & Verification
+    "pytest": "pytest",
+    "hypothesis": "hypothesis",
 }
 
 
@@ -2816,6 +3026,154 @@ auto_docker_*.py
                                            indent=2, sort_keys=True) + "\n"
         return data
 
+    def render_k8s(self, plan: Plan) -> str:
+        slug = re.sub(r"[^a-z0-9-]", "-", plan.inspection.root.name.lower()).strip("-")[:24] or "app"
+        port = plan.port or 8000
+        health = plan.health_path or "/"
+        replicas = plan.replicas if plan.replicas and plan.replicas > 0 else 1
+        cpu_limit = f'"{plan.cpus}"' if plan.cpus else '"1"'
+        mem_limit = f'"{plan.memory}"' if plan.memory else '"512Mi"'
+        cmd_json = json.dumps(list(plan.command))
+
+        if plan.execution_kind == "batch":
+            return (
+                "apiVersion: batch/v1\n"
+                "kind: Job\n"
+                "metadata:\n"
+                f"  name: {slug}-job\n"
+                "  labels:\n"
+                f"    app: {slug}\n"
+                "spec:\n"
+                "  backoffLimit: 3\n"
+                "  template:\n"
+                "    metadata:\n"
+                f"      labels:\n"
+                f"        app: {slug}\n"
+                "    spec:\n"
+                "      restartPolicy: Never\n"
+                "      securityContext:\n"
+                "        runAsNonRoot: true\n"
+                "        runAsUser: 1000\n"
+                "        fsGroup: 1000\n"
+                "      containers:\n"
+                f"        - name: {slug}\n"
+                f"          image: {slug}:latest\n"
+                f"          command: {cmd_json}\n"
+                "          env:\n"
+                '            - name: PYTHONUNBUFFERED\n'
+                '              value: "1"\n'
+                "          resources:\n"
+                "            requests:\n"
+                '              cpu: 100m\n'
+                '              memory: 128Mi\n'
+                "            limits:\n"
+                f"              cpu: {cpu_limit}\n"
+                f"              memory: {mem_limit}\n"
+            )
+
+        return (
+            "apiVersion: apps/v1\n"
+            "kind: Deployment\n"
+            "metadata:\n"
+            f"  name: {slug}\n"
+            "  labels:\n"
+            f"    app: {slug}\n"
+            "spec:\n"
+            f"  replicas: {replicas}\n"
+            "  selector:\n"
+            "    matchLabels:\n"
+            f"      app: {slug}\n"
+            "  template:\n"
+            "    metadata:\n"
+            f"      labels:\n"
+            f"        app: {slug}\n"
+            "    spec:\n"
+            "      securityContext:\n"
+            "        runAsNonRoot: true\n"
+            "        runAsUser: 1000\n"
+            "        fsGroup: 1000\n"
+            "      containers:\n"
+            f"        - name: {slug}\n"
+            f"          image: {slug}:latest\n"
+            "          imagePullPolicy: IfNotPresent\n"
+            f"          command: {cmd_json}\n"
+            "          env:\n"
+            '            - name: PYTHONUNBUFFERED\n'
+            '              value: "1"\n'
+            "          ports:\n"
+            f"            - containerPort: {port}\n"
+            "              name: http\n"
+            "          resources:\n"
+            "            requests:\n"
+            '              cpu: 100m\n'
+            '              memory: 128Mi\n'
+            "            limits:\n"
+            f"              cpu: {cpu_limit}\n"
+            f"              memory: {mem_limit}\n"
+            "          livenessProbe:\n"
+            "            httpGet:\n"
+            f"              path: {health}\n"
+            f"              port: {port}\n"
+            "            initialDelaySeconds: 15\n"
+            "            periodSeconds: 20\n"
+            "          readinessProbe:\n"
+            "            httpGet:\n"
+            f"              path: {health}\n"
+            f"              port: {port}\n"
+            "            initialDelaySeconds: 5\n"
+            "            periodSeconds: 10\n"
+            "---\n"
+            "apiVersion: v1\n"
+            "kind: Service\n"
+            "metadata:\n"
+            f"  name: {slug}-svc\n"
+            "  labels:\n"
+            f"    app: {slug}\n"
+            "spec:\n"
+            "  type: ClusterIP\n"
+            "  selector:\n"
+            f"    app: {slug}\n"
+            "  ports:\n"
+            f"    - port: 80\n"
+            f"      targetPort: {port}\n"
+            "      name: http\n"
+        )
+
+    def render_ci(self, plan: Plan) -> str:
+        slug = re.sub(r"[^a-z0-9-]", "-", plan.inspection.root.name.lower()).strip("-")[:24] or "app"
+        return (
+            "name: Auto Docker CI Pipeline\n\n"
+            "on:\n"
+            "  push:\n"
+            "    branches: [ \"main\", \"master\" ]\n"
+            "  pull_request:\n"
+            "    branches: [ \"main\", \"master\" ]\n\n"
+            "jobs:\n"
+            "  validate-and-build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - name: Check out repository\n"
+            "        uses: actions/checkout@v4\n\n"
+            "      - name: Set up Python\n"
+            "        uses: actions/setup-python@v5\n"
+            "        with:\n"
+            '          python-version: "3.11"\n\n'
+            "      - name: Verify Auto Docker Static Integrity\n"
+            "        run: |\n"
+            "          python auto_docker.py audit .\n\n"
+            "      - name: Set up Docker Buildx\n"
+            "        uses: docker/setup-buildx-action@v3\n\n"
+            "      - name: Build Application Container\n"
+            "        uses: docker/build-push-action@v5\n"
+            "        with:\n"
+            "          context: .\n"
+            "          file: .opsforge/Dockerfile\n"
+            "          push: false\n"
+            f"          tags: {slug}:latest\n"
+            "          cache-from: type=gha\n"
+            "          cache-to: type=gha,mode=max\n"
+        )
+
 
 # ---------- Transactional filesystem and Docker execution ----------
 
@@ -3213,6 +3571,10 @@ class OutputManager:
         known = {"Dockerfile", "Dockerfile.dockerignore", "compose.yaml", "INSTRUCTIONS.txt"}
         if "prometheus.yml" in expected_files:
             known = known | {"prometheus.yml"}
+        if "k8s-deployment.yaml" in expected_files:
+            known = known | {"k8s-deployment.yaml"}
+        if "github-ci.yml" in expected_files:
+            known = known | {"github-ci.yml"}
         errors: list[str] = []
         runtime = manifest.get('runtime')
         if runtime is not None:
@@ -4893,8 +5255,20 @@ class DeploymentDigest:
             else:
                 files_data[f"compose:{cf}"] = "MISSING"
 
-        # 2. Referenced Dockerfiles
-        for df in stack.dockerfiles:
+        # 2. Referenced Dockerfiles (root & per-service build contexts)
+        dockerfiles_to_hash = set(stack.dockerfiles)
+        for s in stack.discovered_services:
+            if s.dockerfile:
+                context_prefix = Path(s.build_context) if s.build_context and not s.build_context.startswith(("/", "\\")) else Path(".")
+                df_rel = (context_prefix / s.dockerfile).as_posix().lstrip("./")
+                dockerfiles_to_hash.add(df_rel)
+            elif s.build_context:
+                context_prefix = Path(s.build_context) if not s.build_context.startswith(("/", "\\")) else Path(".")
+                df_rel = (context_prefix / "Dockerfile").as_posix().lstrip("./")
+                if (resolved_root / df_rel).is_file():
+                    dockerfiles_to_hash.add(df_rel)
+
+        for df in sorted(dockerfiles_to_hash):
             df_path = resolved_root / df
             if df_path.is_symlink():
                 files_data[f"dockerfile:{df}"] = f"SYMLINK:{df_path.resolve()}"
@@ -14302,6 +14676,49 @@ except ImportError:
                 dockerfile = files["Dockerfile"]
                 self.assertIn("--index-url https://download.pytorch.org/whl/cpu", dockerfile)
 
+        def test_rc11_expanded_enterprise_packages(self):
+            self.assertEqual(IMPORT_PACKAGES["kafka"], "kafka-python")
+            self.assertEqual(IMPORT_PACKAGES["sentry_sdk"], "sentry-sdk")
+            self.assertEqual(IMPORT_PACKAGES["weaviate"], "weaviate-client")
+            self.assertEqual(IMPORT_PACKAGES["pyodbc"], "pyodbc")
+            self.assertEqual(IMPORT_PACKAGES["duckdb"], "duckdb")
+
+        def test_rc11_compose_yaml_quoted_comment_and_flow_lists(self):
+            yaml_content = """services:
+    web:
+        image: python:3.11-slim
+        command: "run --pass secret#123"
+        ports: ["8080:80", "443:443"]
+        volumes:
+          - type: bind
+            source: /data
+            target: /app/data
+"""
+            parsed = parse_compose_services_static(yaml_content)
+            self.assertIn("web", parsed)
+            self.assertEqual(parsed["web"]["image"], "python:3.11-slim")
+            self.assertIn("8080:80", parsed["web"]["ports"])
+            self.assertIn("443:443", parsed["web"]["ports"])
+            self.assertIn("/data:/app/data", parsed["web"]["volumes"])
+            self.assertIn("secret#123", parsed["web"]["command"])
+
+        def test_rc11_kubernetes_and_ci_rendering(self):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                repo = Path(tmpdir).resolve()
+                (repo / "server.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+                target = target_for(str(repo / "server.py"))
+                settings = Settings(target)
+                insp = Inspector().inspect(target)
+                plan = Planner().build(settings, insp)
+                renderer = Renderer()
+                k8s = renderer.render_k8s(plan)
+                ci = renderer.render_ci(plan)
+                self.assertIn("kind: Deployment", k8s)
+                self.assertIn("kind: Service", k8s)
+                self.assertIn("runAsNonRoot: true", k8s)
+                self.assertIn("name: Auto Docker CI Pipeline", ci)
+                self.assertIn("docker/build-push-action", ci)
+
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(Tests)
     outcome = unittest.TextTestRunner(verbosity=2).run(suite)
     if not outcome.wasSuccessful():
@@ -14344,7 +14761,8 @@ def main(argv: list[str] | None = None) -> int:
         "existing", "native", "readiness", "preflight", "inspect", "preview", "generate",
         "check", "ports", "verify", "diagnose", "audit", "dryrun", "build", "up", "run",
         "job", "down", "ps", "logs", "recover", "unlock", "lock", "contexts", "self-test",
-        "integration-test", "ai-integration-test", "live-test", "smoke", "cleaner", "clean"
+        "integration-test", "ai-integration-test", "live-test", "smoke", "cleaner", "clean",
+        "k8s", "ci"
     }
 
     if argv and not argv[0].startswith("-") and argv[0] not in KNOWN_ACTIONS:
@@ -14352,7 +14770,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description="Auto Docker: generate Docker infrastructure from one Python script")
     parser.add_argument("action", nargs="?", default="smart", choices=(
-        "smart", "console", "guide", "onboard", "wizard", "quick", "autopilot", "doctor", "existing", "native", "readiness", "preflight", "inspect", "preview", "generate", "check", "ports", "verify", "diagnose", "audit", "dryrun", "build", "up", "run", "job", "down", "ps", "logs", "recover", "unlock", "lock", "contexts", "self-test", "integration-test", "ai-integration-test", "live-test", "smoke", "cleaner", "clean"))
+        "smart", "console", "guide", "onboard", "wizard", "quick", "autopilot", "doctor", "existing", "native", "readiness", "preflight", "inspect", "preview", "generate", "check", "ports", "verify", "diagnose", "audit", "dryrun", "build", "up", "run", "job", "down", "ps", "logs", "recover", "unlock", "lock", "contexts", "self-test", "integration-test", "ai-integration-test", "live-test", "smoke", "cleaner", "clean", "k8s", "ci"))
     parser.add_argument("path", nargs="?", help="Project folder or exact Python .py file")
     parser.add_argument("--native-action", choices=('inspect','plan','check','ready','build','up','down','ps','logs','verify'), default='inspect',
                         help='Existing Compose project action for native mode')
@@ -14659,6 +15077,18 @@ def main(argv: list[str] | None = None) -> int:
                     raise OpsError("Generation cancelled. Pass --yes for intentional noninteractive generation.")
             backup = out.write(files)
             print(f"Generated {out.folder}" + (f"; backup: {backup}" if backup else ""))
+            return 0
+        if args.action in {"k8s", "ci"}:
+            plan = Planner().build(settings, Inspector().inspect(settings.target, settings.entry))
+            content = Renderer().render_k8s(plan) if args.action == "k8s" else Renderer().render_ci(plan)
+            fname = "k8s-deployment.yaml" if args.action == "k8s" else "github-ci.yml"
+            if not args.yes:
+                print(f"--- {fname} ---\n{content}")
+            if args.yes or (sys.stdin.isatty() and input(f"Write {fname} to .opsforge/? Type YES: ").strip() == "YES"):
+                out_dir = settings.target.root / OUTPUT
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / fname).write_text(content, encoding="utf-8")
+                print(f"Generated {out_dir / fname}")
             return 0
         if args.action == 'audit':
             return 0 if OfflineDeploymentAudit.print_report(settings.target.root) else 1

@@ -800,6 +800,42 @@ pub fn resolve_pypi_package(import_name: &str) -> String {
         "telegram" => "python-telegram-bot".to_string(),
         "discord" => "discord.py".to_string(),
         "slack_sdk" => "slack-sdk".to_string(),
+        "kafka" => "kafka-python".to_string(),
+        "confluent_kafka" => "confluent-kafka".to_string(),
+        "pika" => "pika".to_string(),
+        "kombu" => "kombu".to_string(),
+        "rq" => "rq".to_string(),
+        "dramatiq" => "dramatiq".to_string(),
+        "nats" => "nats-py".to_string(),
+        "pyodbc" => "pyodbc".to_string(),
+        "oracledb" => "oracledb".to_string(),
+        "cx_oracle" => "cx-Oracle".to_string(),
+        "sqlmodel" => "sqlmodel".to_string(),
+        "tortoise" => "tortoise-orm".to_string(),
+        "peewee" => "peewee".to_string(),
+        "neo4j" => "neo4j".to_string(),
+        "cassandra" => "cassandra-driver".to_string(),
+        "duckdb" => "duckdb".to_string(),
+        "opensearchpy" => "opensearch-py".to_string(),
+        "weaviate" => "weaviate-client".to_string(),
+        "pinecone" => "pinecone-client".to_string(),
+        "pymilvus" => "pymilvus".to_string(),
+        "minio" => "minio".to_string(),
+        "s3fs" => "s3fs".to_string(),
+        "gcsfs" => "gcsfs".to_string(),
+        "sentry_sdk" => "sentry-sdk".to_string(),
+        "opentelemetry" => "opentelemetry-api".to_string(),
+        "datadog" => "datadog".to_string(),
+        "newrelic" => "newrelic".to_string(),
+        "scrapy" => "Scrapy".to_string(),
+        "playwright" => "playwright".to_string(),
+        "selenium" => "selenium".to_string(),
+        "paramiko" => "paramiko".to_string(),
+        "fabric" => "fabric".to_string(),
+        "netmiko" => "netmiko".to_string(),
+        "grpc" => "grpcio".to_string(),
+        "pytest" => "pytest".to_string(),
+        "hypothesis" => "hypothesis".to_string(),
         _ => import_name.to_string(),
     }
 }
@@ -1931,6 +1967,8 @@ impl Renderer {
         map.insert("manifest.json".to_string(), Self::manifest(plan));
         map.insert("Dockerfile.dockerignore".to_string(), Self::dockerignore());
         map.insert("INSTRUCTIONS.txt".to_string(), Self::instructions(plan));
+        map.insert("k8s-deployment.yaml".to_string(), Self::k8s(plan));
+        map.insert("github-ci.yml".to_string(), Self::ci(plan));
         map
     }
 
@@ -2183,6 +2221,168 @@ impl Renderer {
             VERSION,
             plan.inspection.entry.rel_path,
             plan.execution_kind.as_str()
+        )
+    }
+
+    pub fn k8s(plan: &Plan) -> String {
+        let slug = plan.inspection.root.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("app")
+            .to_lowercase()
+            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-")
+            .trim_matches('-')
+            .to_string();
+        let slug = if slug.is_empty() { "app".to_string() } else { slug };
+        let port = plan.port.unwrap_or(8000);
+        let health = plan.health_path.as_deref().unwrap_or("/");
+        let cmd_str = format!("[\"{}\"]", plan.command.join("\", \""));
+
+        if plan.execution_kind == ExecutionKind::Batch {
+            return format!(
+"apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {slug}-job
+  labels:
+    app: {slug}
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: {slug}
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: {slug}
+          image: {slug}:latest
+          command: {cmd_str}
+          env:
+            - name: PYTHONUNBUFFERED
+              value: \"1\"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: \"1\"
+              memory: \"512Mi\"
+"
+            );
+        }
+
+        format!(
+"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {slug}
+  labels:
+    app: {slug}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {slug}
+  template:
+    metadata:
+      labels:
+        app: {slug}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: {slug}
+          image: {slug}:latest
+          imagePullPolicy: IfNotPresent
+          command: {cmd_str}
+          env:
+            - name: PYTHONUNBUFFERED
+              value: \"1\"
+          ports:
+            - containerPort: {port}
+              name: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: \"1\"
+              memory: \"512Mi\"
+          livenessProbe:
+            httpGet:
+              path: {health}
+              port: {port}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: {health}
+              port: {port}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {slug}-svc
+  labels:
+    app: {slug}
+spec:
+  type: ClusterIP
+  selector:
+    app: {slug}
+  ports:
+    - port: 80
+      targetPort: {port}
+      name: http
+"
+        )
+    }
+
+    pub fn ci(plan: &Plan) -> String {
+        let slug = plan.inspection.root.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("app")
+            .to_lowercase()
+            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-")
+            .trim_matches('-')
+            .to_string();
+        let slug = if slug.is_empty() { "app".to_string() } else { slug };
+        format!(
+"name: Auto Docker CI Pipeline
+
+on:
+  push:
+    branches: [ \"main\", \"master\" ]
+  pull_request:
+    branches: [ \"main\", \"master\" ]
+
+jobs:
+  validate-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Application Container
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: .opsforge/Dockerfile
+          push: false
+          tags: {slug}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+"
         )
     }
 }
@@ -2950,6 +3150,7 @@ impl MockHttpServer {
                             );
                             let _ = stream.write_all(resp.as_bytes());
                             let _ = stream.flush();
+                            let _ = stream.shutdown(std::net::Shutdown::Write);
                         }
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -3017,11 +3218,31 @@ impl AppSmoke {
             .map_err(|e| OpsError::General(format!("Failed to send HTTP request: {}", e)))?;
         stream.flush().map_err(|e| OpsError::General(format!("Failed to flush HTTP request: {}", e)))?;
 
-        let mut response = String::new();
-        stream.read_to_string(&mut response)
-            .map_err(|e| OpsError::General(format!("Failed to read HTTP response: {}", e)))?;
+        let mut response = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(ref e) if e.kind() == io::ErrorKind::ConnectionAborted || e.kind() == io::ErrorKind::ConnectionReset => {
+                    if !response.is_empty() {
+                        break;
+                    } else {
+                        return Err(OpsError::General(format!("Failed to read HTTP response: {}", e)));
+                    }
+                }
+                Err(e) => {
+                    if !response.is_empty() {
+                        break;
+                    }
+                    return Err(OpsError::General(format!("Failed to read HTTP response: {}", e)));
+                }
+            }
+        }
 
-        let mut lines = response.lines();
+        let response_str = String::from_utf8_lossy(&response).to_string();
+        let mut lines = response_str.lines();
         let status_line = lines.next().unwrap_or("");
         let parts: Vec<&str> = status_line.split_whitespace().collect();
         let status_code = if parts.len() >= 2 {
@@ -3030,7 +3251,7 @@ impl AppSmoke {
             0
         };
 
-        Ok((status_code, response))
+        Ok((status_code, response_str))
     }
 
     pub fn wait_healthy(host: &str, port: u16, path: &str, max_retries: usize, delay_ms: u64) -> Result<bool, OpsError> {
@@ -4037,6 +4258,8 @@ pub fn print_usage() {
     println!("  doctor     Run host environment, storage, and GPU diagnostics");
     println!("  clean      Run scoped resource cleaner");
     println!("  verify     Perform complete offline deployment audit and hash proof");
+    println!("  k8s        Generate hardened Kubernetes Deployment & Service manifests");
+    println!("  ci         Generate GitHub Actions CI/CD pipeline workflow");
     println!("  self-test  Execute built-in comprehensive 100+ test suite");
     println!();
     println!("Options:");
@@ -4169,6 +4392,20 @@ pub fn run_cli(args: &[String]) -> Result<(), OpsError> {
             }
             Ok(())
         }
+        "k8s" | "ci" => {
+            let console = Console::new(Some(settings));
+            let s = console.settings.as_ref().unwrap();
+            let inspection = Inspector::inspect(&s.target, s.explicit_entry.as_deref())?;
+            let plan = Planner::build(s, inspection)?;
+            let content = if cmd == "k8s" { Renderer::k8s(&plan) } else { Renderer::ci(&plan) };
+            let fname = if cmd == "k8s" { "k8s-deployment.yaml" } else { "github-ci.yml" };
+            println!("--- {} ---\n{}", fname, content);
+            let out_dir = cwd.join(".opsforge");
+            let _ = fs::create_dir_all(&out_dir);
+            let _ = fs::write(out_dir.join(fname), &content);
+            println!("Generated {}", out_dir.join(fname).display());
+            Ok(())
+        }
         _ => {
             println!("Unknown command: {}", cmd);
             print_usage();
@@ -4188,7 +4425,7 @@ fn main() {
 
 
 // ============================================================================
-// 32. Comprehensive Self-Test Regression Suite (118 Tests)
+// 32. Comprehensive Self-Test Regression Suite (121 Tests)
 // ============================================================================
 
 pub fn run_self_test() {
@@ -5319,6 +5556,41 @@ pub fn run_self_test() {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    fn test_119_expanded_enterprise_packages() {
+        assert_eq!(resolve_pypi_package("kafka"), "kafka-python");
+        assert_eq!(resolve_pypi_package("sentry_sdk"), "sentry-sdk");
+        assert_eq!(resolve_pypi_package("weaviate"), "weaviate-client");
+        assert_eq!(resolve_pypi_package("pyodbc"), "pyodbc");
+        assert_eq!(resolve_pypi_package("duckdb"), "duckdb");
+    }
+
+    fn test_120_renderer_k8s_manifest_generation() {
+        let dir = make_test_dir("t120");
+        fs::write(dir.join("main.py"), "from fastapi import FastAPI\napp = FastAPI()").unwrap();
+        let target = target_for_path(&dir).unwrap();
+        let settings = Settings::new(target);
+        let ins = Inspector::inspect(&settings.target, settings.explicit_entry.as_deref()).unwrap();
+        let plan = Planner::build(&settings, ins).unwrap();
+        let k8s = Renderer::k8s(&plan);
+        assert!(k8s.contains("kind: Deployment"));
+        assert!(k8s.contains("kind: Service"));
+        assert!(k8s.contains("runAsNonRoot: true"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn test_121_renderer_ci_workflow_generation() {
+        let dir = make_test_dir("t121");
+        fs::write(dir.join("main.py"), "print('ci test')").unwrap();
+        let target = target_for_path(&dir).unwrap();
+        let settings = Settings::new(target);
+        let ins = Inspector::inspect(&settings.target, settings.explicit_entry.as_deref()).unwrap();
+        let plan = Planner::build(&settings, ins).unwrap();
+        let ci = Renderer::ci(&plan);
+        assert!(ci.contains("name: Auto Docker CI Pipeline"));
+        assert!(ci.contains("docker/build-push-action"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     // ------------------------------------------------------------------------
     // Execute all 118 regression tests
     // ------------------------------------------------------------------------
@@ -5455,6 +5727,9 @@ pub fn run_self_test() {
     run_test!(test_116_console_menu_formatting);
     run_test!(test_117_console_input_exit);
     run_test!(test_118_proof_evidence_markdown_generation);
+    run_test!(test_119_expanded_enterprise_packages);
+    run_test!(test_120_renderer_k8s_manifest_generation);
+    run_test!(test_121_renderer_ci_workflow_generation);
 
     println!("--------------------------------------------------------------------------------");
     println!("Test Results: {} passed, {} failed, {} total", passed, failed, passed + failed);
