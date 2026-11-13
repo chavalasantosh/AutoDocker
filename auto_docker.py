@@ -9129,9 +9129,9 @@ def self_test() -> bool:
         def setUp(self) -> None:
             self.tmp = tempfile.TemporaryDirectory()
             self.addCleanup(self.tmp.cleanup)
-            self.root = (Path(self.tmp.name) / "my local llm").resolve()
+            self.root = (Path(self.tmp.name) / "project space").resolve()
             self.root.mkdir()
-            (self.root / "localllmchat.py").write_text("import ollama\nif __name__ == '__main__':\n print('ok')\n")
+            (self.root / "service.py").write_text("import ollama\nif __name__ == '__main__':\n print('ok')\n")
 
         def _safe_symlink(self, link_path: Path, target_path: Path, target_is_directory: bool = False) -> None:
             try:
@@ -9140,13 +9140,13 @@ def self_test() -> bool:
                 self.skipTest(f"Symlinks not supported in this environment: {exc}")
 
         def config(self, mode: Mode = Mode.BASE, gpu: bool = False) -> tuple[Plan, dict[str, str]]:
-            p = Planner().build(Settings(target_for(str(self.root / "localllmchat.py")), mode=mode, gpu=gpu),
-                                Inspector().inspect(target_for(str(self.root / "localllmchat.py"))))
+            p = Planner().build(Settings(target_for(str(self.root / "service.py")), mode=mode, gpu=gpu),
+                                Inspector().inspect(target_for(str(self.root / "service.py"))))
             return p, Renderer().files(p)
 
         def test_quoted_file_path(self):
-            t = target_for(f"'{self.root / 'localllmchat.py'}'")
-            self.assertEqual(t.pinned, "localllmchat.py")
+            t = target_for(f"'{self.root / 'service.py'}'")
+            self.assertEqual(t.pinned, "service.py")
             self.assertEqual(t.root, self.root)
 
         def test_reject_home(self):
@@ -9155,8 +9155,8 @@ def self_test() -> bool:
 
         def test_file_pin_avoids_other_files(self):
             (self.root / "app.py").write_text("print('wrong')")
-            x = Inspector().inspect(target_for(str(self.root / "localllmchat.py")))
-            self.assertEqual(x.entry.path, "localllmchat.py")
+            x = Inspector().inspect(target_for(str(self.root / "service.py")))
+            self.assertEqual(x.entry.path, "service.py")
             self.assertEqual(x.python_count, 1)
 
         def test_ambiguous_folder(self):
@@ -9258,7 +9258,7 @@ def self_test() -> bool:
             self.assertFalse(manager.validate()[0])
 
         def test_console_back(self):
-            c = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            c = Console(Settings(target_for(str(self.root / "service.py"))))
             c.execute("mode genaiops")
             self.assertEqual(c.settings.mode, Mode.GENAI)
             c.execute("back")
@@ -9267,17 +9267,17 @@ def self_test() -> bool:
         def test_console_project_switch(self):
             c = Console()
             with patch("sys.stdout", new_callable=io.StringIO):
-                c.execute(f"project '{self.root / 'localllmchat.py'}'")
-            self.assertEqual(c.settings.target.pinned, "localllmchat.py")
+                c.execute(f"project '{self.root / 'service.py'}'")
+            self.assertEqual(c.settings.target.pinned, "service.py")
 
         def test_no_write_if_declined(self):
-            c = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            c = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("builtins.input", return_value="NO"), patch("sys.stdout", new_callable=io.StringIO):
                 c.execute("generate")
             self.assertFalse((self.root / OUTPUT).exists())
 
         def test_confirm_yes_is_top_level_command_no_nested_input(self):
-            console = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            console = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("builtins.input", side_effect=AssertionError("nested input is forbidden")), \
                  patch("sys.stdout", new_callable=io.StringIO) as output:
                 console.execute("generate")
@@ -9291,7 +9291,7 @@ def self_test() -> bool:
         def test_multiline_paste_check_queues_until_yes(self):
             console = Console()
             commands = [
-                f"project '{self.root / 'localllmchat.py'}'", "preflight", "mode genaiops",
+                f"project '{self.root / 'service.py'}'", "preflight", "mode genaiops",
                 "preview", "generate", "check", "YES", "quit",
             ]
             with patch("builtins.input", side_effect=commands), \
@@ -9305,7 +9305,7 @@ def self_test() -> bool:
 
         def test_terminal_delivering_one_multiline_string(self):
             console = Console()
-            commands = (f"project '{self.root / 'localllmchat.py'}'\n"
+            commands = (f"project '{self.root / 'service.py'}'\n"
                         "mode genaiops\npreview\ngenerate\ncheck\nYES")
             with patch("builtins.input", side_effect=[commands, "quit"]), \
                  patch("sys.stdout", new_callable=io.StringIO) as output:
@@ -9315,7 +9315,7 @@ def self_test() -> bool:
             self.assertTrue(OutputManager(self.root).validate()[0])
 
         def test_no_implicit_yes_from_check(self):
-            console = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            console = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("sys.stdout", new_callable=io.StringIO):
                 console.execute("generate")
                 console.execute("check")
@@ -9324,7 +9324,7 @@ def self_test() -> bool:
             self.assertFalse((self.root / OUTPUT).exists())
 
         def test_generate_yes_single_command(self):
-            console = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            console = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("builtins.input", side_effect=AssertionError("nested input is forbidden")), \
                  patch("sys.stdout", new_callable=io.StringIO):
                 console.execute("generate YES")
@@ -9332,7 +9332,7 @@ def self_test() -> bool:
             self.assertTrue(OutputManager(self.root).validate()[0])
 
         def test_change_setting_cancels_outstanding_generate(self):
-            console = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            console = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("sys.stdout", new_callable=io.StringIO):
                 console.execute("generate")
                 console.execute("mode llmops")
@@ -9342,7 +9342,7 @@ def self_test() -> bool:
             self.assertFalse((self.root / OUTPUT).exists())
 
         def test_changed_output_before_confirmation_aborts(self):
-            console = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            console = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("sys.stdout", new_callable=io.StringIO):
                 console.execute("generate")
                 manager = OutputManager(self.root)
@@ -9352,7 +9352,7 @@ def self_test() -> bool:
             self.assertIsNone(console.pending)
 
         def test_pending_generation_ctrl_c_never_writes(self):
-            console = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            console = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("builtins.input", side_effect=["generate", KeyboardInterrupt, "quit"]), \
                  patch("sys.stdout", new_callable=io.StringIO) as output:
                 console.loop()
@@ -9361,7 +9361,7 @@ def self_test() -> bool:
             self.assertFalse((self.root / OUTPUT).exists())
 
         def test_build_confirmation_does_not_consume_nested_input(self):
-            console = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            console = Console(Settings(target_for(str(self.root / "service.py"))))
             OutputManager(self.root).write(self.config()[1])
             with patch("builtins.input", side_effect=AssertionError("nested input is forbidden")), \
                  patch("sys.stdout", new_callable=io.StringIO), \
@@ -9384,7 +9384,7 @@ def self_test() -> bool:
             self.assertEqual(event["severity"], "INFO")
 
         def test_keyboard_interrupt_stays_in_console(self):
-            c = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            c = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("builtins.input", side_effect=[KeyboardInterrupt, "quit"]), patch("sys.stdout", new_callable=io.StringIO) as output:
                 c.loop()
             self.assertIn("still in Auto Docker", output.getvalue())
@@ -9395,7 +9395,7 @@ def self_test() -> bool:
             self.assertIn("pip install --no-cache-dir -r requirements.txt", files["Dockerfile"])
 
         def test_fastapi_command(self):
-            (self.root / "localllmchat.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+            (self.root / "service.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
             p, _ = self.config()
             self.assertEqual(p.port, 8000)
             self.assertIn("uvicorn", p.command)
@@ -9411,7 +9411,7 @@ def self_test() -> bool:
             self.assertIn("USER app", dockerfile)
 
         def test_web_service_restarts(self):
-            (self.root / "localllmchat.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+            (self.root / "service.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
             _, files = self.config(Mode.BASE)
             self.assertIn('restart: "unless-stopped"', files["compose.yaml"])
 
@@ -9423,14 +9423,14 @@ def self_test() -> bool:
                 self.assertIn(part, y)
 
         def test_services_override(self):
-            t = target_for(str(self.root / "localllmchat.py"))
+            t = target_for(str(self.root / "service.py"))
             settings = Settings(t, mode=Mode.BASE, services_override=parse_services("redis,ollama"))
             plan = Planner().build(settings, Inspector().inspect(t))
             self.assertEqual(plan.services, ("ollama", "redis"))
             self.assertNotIn("mlflow", Renderer().files(plan)["compose.yaml"])
 
         def test_services_empty_explicit(self):
-            t = target_for(str(self.root / "localllmchat.py"))
+            t = target_for(str(self.root / "service.py"))
             settings = Settings(t, mode=Mode.GENAI, services_override=parse_services("none"))
             plan = Planner().build(settings, Inspector().inspect(t))
             self.assertEqual(plan.services, ())
@@ -9441,7 +9441,7 @@ def self_test() -> bool:
                     parse_services(value)
 
         def test_services_menu_back(self):
-            c = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            c = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("sys.stdout", new_callable=io.StringIO):
                 c.execute("services ollama")
                 self.assertEqual(c.settings.services_override, ("ollama",))
@@ -9475,7 +9475,7 @@ def self_test() -> bool:
             self.assertEqual(plan.command[5], "my nested api")
 
         def test_mode_resets_custom_services(self):
-            c = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            c = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("sys.stdout", new_callable=io.StringIO):
                 c.execute("services redis")
                 c.execute("mode base")
@@ -9644,7 +9644,7 @@ def self_test() -> bool:
         def test_legacy_lock_migrates_no_files(self):
             path = self.root / ".opsforge.lock"
             path.touch()
-            console = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            console = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("shutil.which", return_value=None), \
                  patch("sys.stdout", new_callable=io.StringIO) as output:
                 console.execute("mode genaiops")
@@ -9678,14 +9678,14 @@ def self_test() -> bool:
             self.assertEqual(external.read_text(), "do not change")
 
         def test_console_lock_inspection(self):
-            console = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            console = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("sys.stdout", new_callable=io.StringIO) as out:
                 self.assertTrue(console.execute("lock"))
             self.assertIn("No active lock", out.getvalue())
 
         def test_preflight_infer_does_not_claim_strict_mode(self):
-            (self.root / "localllmchat.py").write_text("import httpx\n")
-            console = Console(Settings(target_for(str(self.root / "localllmchat.py")),
+            (self.root / "service.py").write_text("import httpx\n")
+            console = Console(Settings(target_for(str(self.root / "service.py")),
                                        dependency_mode="infer"))
             with patch("sys.stdout", new_callable=io.StringIO) as out:
                 self.assertTrue(console.execute("preflight"))
@@ -9748,7 +9748,7 @@ def self_test() -> bool:
             self.assertIn("explicit project path", capture.getvalue())
 
         def test_recover_console_no_backup_is_recoverable(self):
-            console = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            console = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("sys.stdout", new_callable=io.StringIO):
                 with self.assertRaisesRegex(OpsError, "No Auto Docker backups"):
                     console.execute("recover")
@@ -9759,7 +9759,7 @@ def self_test() -> bool:
             manager.write(self.config()[1])
             manager.write(self.config(Mode.GENAI)[1])
             shutil.rmtree(manager.folder)
-            console = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            console = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("builtins.input", side_effect=AssertionError("nested input is forbidden")), \
                  patch("sys.stdout", new_callable=io.StringIO):
                 console.execute("recover")
@@ -9770,7 +9770,7 @@ def self_test() -> bool:
 
         def test_cli_recover_requires_confirmation(self):
             with patch("sys.stdin.isatty", return_value=False), patch("sys.stderr", new_callable=io.StringIO):
-                self.assertEqual(main(["recover", str(self.root / "localllmchat.py")]), 2)
+                self.assertEqual(main(["recover", str(self.root / "service.py")]), 2)
 
         def test_yaml_external_if_available(self):
             try:
@@ -9790,7 +9790,7 @@ def self_test() -> bool:
             self.assertIn('"127.0.0.1:5000:5000"', files['compose.yaml'])
 
         def test_host_port_override_without_internal_port_change(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             i = Inspector().inspect(target)
             settings = Settings(target, mode=Mode.LLMOPS, host_ports=(('mlflow', 5051), ('ollama', 11500)))
             plan = Planner().build(settings, i)
@@ -9800,26 +9800,26 @@ def self_test() -> bool:
             self.assertIn('"--port"', content)
 
         def test_host_port_duplicate_rejected(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             with self.assertRaisesRegex(OpsError, 'same port'):
                 Planner().build(Settings(target, mode=Mode.LLMOPS,
                                          host_ports=(('mlflow', 11500), ('ollama', 11500))),
                                 Inspector().inspect(target))
 
         def test_host_port_for_disabled_service_rejected(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             with self.assertRaisesRegex(OpsError, 'disabled or portless'):
                 Planner().build(Settings(target, mode=Mode.BASE, host_ports=(('mlflow', 5500),)),
                                 Inspector().inspect(target))
 
         def test_host_port_non_numeric_rejected_cli(self):
             with patch('sys.stderr', new_callable=io.StringIO) as stderr:
-                result = main(['preview', str(self.root / 'localllmchat.py'), '--host-port', 'mlflow=abc'])
+                result = main(['preview', str(self.root / 'service.py'), '--host-port', 'mlflow=abc'])
             self.assertEqual(result, 2)
             self.assertIn('SERVICE=PORT', stderr.getvalue())
 
         def test_host_port_console_undo(self):
-            console = Console(Settings(target_for(str(self.root / 'localllmchat.py')), mode=Mode.LLMOPS))
+            console = Console(Settings(target_for(str(self.root / 'service.py')), mode=Mode.LLMOPS))
             with patch('sys.stdout', new_callable=io.StringIO):
                 console.execute('hostport mlflow 5500')
                 self.assertEqual(console.settings.host_ports, (('mlflow', 5500),))
@@ -9830,7 +9830,7 @@ def self_test() -> bool:
             self.assertEqual(console.settings.host_ports, ())
 
         def test_explicit_ports_take_priority_over_automatic_ports(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             plan = Planner().build(Settings(target, mode=Mode.LLMOPS,
                                             host_ports=(('ollama', 5000),)),
                                    Inspector().inspect(target))
@@ -9839,7 +9839,7 @@ def self_test() -> bool:
             self.assertEqual(ports['mlflow'], 5001)
 
         def test_saved_ports_are_used_after_console_settings_change(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             plan = Planner().build(Settings(target, mode=Mode.LLMOPS,
                                             host_ports=(('mlflow', 5999),)),
                                    Inspector().inspect(target))
@@ -9975,7 +9975,7 @@ def self_test() -> bool:
         def test_generator_excludes_renamed_script(self):
             (self.root / "auto_docker.py").write_text("print('generator')")
             (self.root / "auto_docker_helpers.py").write_text("print('generator')")
-            self.assertEqual(_collect_python(self.root), [self.root / "localllmchat.py"])
+            self.assertEqual(_collect_python(self.root), [self.root / "service.py"])
 
         def test_gradio_application_has_reachable_host_port(self):
             script = self.root / "chat.py"
@@ -10019,8 +10019,8 @@ def self_test() -> bool:
             self.assertTrue(any("Cannot safely read requirements" in x for x in report.warnings))
 
         def test_deps_strict_does_not_install_guessed_packages(self):
-            (self.root / "localllmchat.py").write_text("import httpx\n")
-            target = target_for(str(self.root / "localllmchat.py"))
+            (self.root / "service.py").write_text("import httpx\n")
+            target = target_for(str(self.root / "service.py"))
             plan = Planner().build(Settings(target), Inspector().inspect(target))
             generated = Renderer().files(plan)
             self.assertEqual(plan.inferred_packages, ())
@@ -10028,8 +10028,8 @@ def self_test() -> bool:
             self.assertFalse((self.root / 'requirements.txt').exists())
 
         def test_deps_infer_installs_known_httpx_in_generated_dockerfile_only(self):
-            (self.root / "localllmchat.py").write_text("import httpx\n")
-            target = target_for(str(self.root / "localllmchat.py"))
+            (self.root / "service.py").write_text("import httpx\n")
+            target = target_for(str(self.root / "service.py"))
             plan = Planner().build(Settings(target, dependency_mode='infer'), Inspector().inspect(target))
             self.assertEqual(plan.inferred_packages, ('httpx',))
             generated = Renderer().files(plan)
@@ -10039,8 +10039,8 @@ def self_test() -> bool:
             self.assertTrue(any('unpin' in x.lower() for x in plan.warnings))
 
         def test_deps_infer_deterministic_for_multiple_known_imports(self):
-            (self.root / 'localllmchat.py').write_text('import redis\nimport httpx\n')
-            target = target_for(str(self.root / 'localllmchat.py'))
+            (self.root / 'service.py').write_text('import redis\nimport httpx\n')
+            target = target_for(str(self.root / 'service.py'))
             settings = Settings(target, dependency_mode='infer')
             p1 = Planner().build(settings, Inspector().inspect(target))
             p2 = Planner().build(settings, Inspector().inspect(target))
@@ -10058,18 +10058,18 @@ def self_test() -> bool:
         def test_deps_infer_rejects_manifest_and_preserves_file(self):
             req = self.root / 'requirements.txt'
             req.write_text('ollama==0.4.0\n')
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             with self.assertRaisesRegex(OpsError, 'manifest'):
                 Planner().build(Settings(target, dependency_mode='infer'), Inspector().inspect(target))
             self.assertEqual(req.read_text(), 'ollama==0.4.0\n')
 
         def test_deps_unknown_policy_rejected(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             with self.assertRaisesRegex(OpsError, 'policy'):
                 Planner().build(Settings(target, dependency_mode='everything'), Inspector().inspect(target))
 
         def test_deps_console_change_undo_and_status(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             c = Console(Settings(target))
             with patch('sys.stdout', new_callable=io.StringIO) as out:
                 c.execute('deps infer')
@@ -10080,9 +10080,9 @@ def self_test() -> bool:
             self.assertEqual(c.settings.dependency_mode, 'strict')
 
         def test_deps_cli_inference_and_integrity(self):
-            (self.root / 'localllmchat.py').write_text('import httpx\n')
+            (self.root / 'service.py').write_text('import httpx\n')
             with patch('sys.stdout', new_callable=io.StringIO) as out:
-                result = main(['generate', str(self.root / 'localllmchat.py'), '--mode', 'base',
+                result = main(['generate', str(self.root / 'service.py'), '--mode', 'base',
                                '--deps', 'infer', '--yes'])
             self.assertEqual(result, 0)
             self.assertIn('httpx', out.getvalue())
@@ -10093,8 +10093,8 @@ def self_test() -> bool:
             self.assertEqual(meta['runtime']['inferred_packages'], ['httpx'])
 
         def test_inferred_manifest_package_validation(self):
-            (self.root / 'localllmchat.py').write_text('import httpx\n')
-            target = target_for(str(self.root / 'localllmchat.py'))
+            (self.root / 'service.py').write_text('import httpx\n')
+            target = target_for(str(self.root / 'service.py'))
             plan = Planner().build(Settings(target, dependency_mode='infer'), Inspector().inspect(target))
             files = Renderer().files(plan)
             meta = json.loads(files['manifest.json'])
@@ -10107,9 +10107,9 @@ def self_test() -> bool:
             self.assertIn('runtime metadata', ' '.join(errors))
 
         def test_dependency_audit_reachable_helper_imports(self):
-            (self.root / 'localllmchat.py').write_text('import helper\n')
+            (self.root / 'service.py').write_text('import helper\n')
             (self.root / 'helper.py').write_text('import httpx\n')
-            report = DependencyAudit().report(Inspector().inspect(target_for(str(self.root / 'localllmchat.py'))))
+            report = DependencyAudit().report(Inspector().inspect(target_for(str(self.root / 'service.py'))))
             self.assertIn('httpx', report.observed)
             self.assertIn('httpx', report.possible_missing)
 
@@ -10123,10 +10123,10 @@ def self_test() -> bool:
             self.assertIn('httpx', report.observed)
 
         def test_dependency_audit_local_cycle_stays_bounded(self):
-            (self.root / 'localllmchat.py').write_text('import a\n')
+            (self.root / 'service.py').write_text('import a\n')
             (self.root / 'a.py').write_text('import b\n')
             (self.root / 'b.py').write_text('import a\nimport httpx\n')
-            report = DependencyAudit().report(Inspector().inspect(target_for(str(self.root / 'localllmchat.py'))))
+            report = DependencyAudit().report(Inspector().inspect(target_for(str(self.root / 'service.py'))))
             self.assertIn('httpx', report.observed)
             self.assertFalse(any('hit 64' in x for x in report.warnings))
 
@@ -10134,13 +10134,13 @@ def self_test() -> bool:
             outside = Path(self.tmp.name) / 'external.py'
             outside.write_text('import httpx\n')
             self._safe_symlink(self.root / 'external.py', outside)
-            (self.root / 'localllmchat.py').write_text('import external\n')
-            report = DependencyAudit().report(Inspector().inspect(target_for(str(self.root / 'localllmchat.py'))))
+            (self.root / 'service.py').write_text('import external\n')
+            report = DependencyAudit().report(Inspector().inspect(target_for(str(self.root / 'service.py'))))
             self.assertNotIn('httpx', report.observed)
 
         def test_deps_inference_keeps_image_dependencies_separate_from_sources(self):
-            (self.root / 'localllmchat.py').write_text('import httpx\n')
-            target = target_for(str(self.root / 'localllmchat.py'))
+            (self.root / 'service.py').write_text('import httpx\n')
+            target = target_for(str(self.root / 'service.py'))
             files = Renderer().files(Planner().build(Settings(target, dependency_mode='infer'), Inspector().inspect(target)))
             self.assertNotIn('COPY . /build', files['Dockerfile'])
             self.assertIn('COPY --chown=app:app . /app', files['Dockerfile'])
@@ -10170,7 +10170,7 @@ def self_test() -> bool:
                 self.assertTrue(any("tomllib" in x for x in report.warnings))
 
         def test_preflight_console_does_not_write(self):
-            console = Console(Settings(target_for(str(self.root / "localllmchat.py"))))
+            console = Console(Settings(target_for(str(self.root / "service.py"))))
             with patch("sys.stdout", new_callable=io.StringIO) as captured:
                 self.assertTrue(console.execute("preflight"))
             self.assertIn("dependency preflight", captured.getvalue())
@@ -10178,7 +10178,7 @@ def self_test() -> bool:
 
         def test_preflight_cli(self):
             with patch("sys.stdout", new_callable=io.StringIO) as captured:
-                code = main(["preflight", str(self.root / "localllmchat.py")])
+                code = main(["preflight", str(self.root / "service.py")])
             self.assertEqual(code, 0)
             self.assertIn("No requirements.txt", captured.getvalue())
 
@@ -10250,7 +10250,7 @@ def self_test() -> bool:
                              'flatpak-spawn is not available in this sandbox')
 
         def test_missing_docker_build_does_not_request_approval(self):
-            console = Console(Settings(target_for(str(self.root / 'localllmchat.py'))))
+            console = Console(Settings(target_for(str(self.root / 'service.py'))))
             OutputManager(self.root).write(self.config()[1])
             with patch('shutil.which', return_value=None), \
                  patch.object(EnvironmentDoctor, 'in_flatpak', return_value=True), \
@@ -10261,7 +10261,7 @@ def self_test() -> bool:
             self.assertNotIn('Approval pending', output.getvalue())
 
         def test_missing_compose_fails_before_build_confirmation(self):
-            console = Console(Settings(target_for(str(self.root / 'localllmchat.py'))))
+            console = Console(Settings(target_for(str(self.root / 'service.py'))))
             OutputManager(self.root).write(self.config()[1])
             with patch('shutil.which', return_value='/usr/bin/docker'), \
                  patch.object(EnvironmentDoctor, '_probe', return_value=(False, 'unknown command')):
@@ -10270,7 +10270,7 @@ def self_test() -> bool:
             self.assertIsNone(console.pending)
 
         def test_missing_engine_fails_before_up_confirmation(self):
-            console = Console(Settings(target_for(str(self.root / 'localllmchat.py'))))
+            console = Console(Settings(target_for(str(self.root / 'service.py'))))
             OutputManager(self.root).write(self.config()[1])
             with patch('shutil.which', return_value='/usr/bin/docker'), \
                  patch.object(EnvironmentDoctor, '_probe', side_effect=[(True, 'Compose 2'), (False, 'no daemon')]):
@@ -10283,7 +10283,7 @@ def self_test() -> bool:
             with patch('shutil.which', return_value=None), \
                  patch('builtins.input', side_effect=AssertionError('no confirmation prompt allowed')), \
                  patch('sys.stderr', new_callable=io.StringIO) as stderr:
-                code = main(['build', str(self.root / 'localllmchat.py')])
+                code = main(['build', str(self.root / 'service.py')])
             self.assertEqual(code, 2)
             self.assertIn('Docker CLI not found', stderr.getvalue())
 
@@ -10310,14 +10310,14 @@ def self_test() -> bool:
                                  ['/usr/bin/docker', '--context', 'remote-ssh', 'compose'])
 
         def test_console_context_restores_via_back(self):
-            c = Console(Settings(target_for(str(self.root / 'localllmchat.py'))))
+            c = Console(Settings(target_for(str(self.root / 'service.py'))))
             with patch('subprocess.run', side_effect=AssertionError('context setter is read-only')):
                 c.execute('context remote-ssh')
             self.assertEqual(c.settings.docker_context, 'remote-ssh')
             c.execute('back')
             self.assertIsNone(c.settings.docker_context)
             c.execute('context another')
-            c.execute('project ' + str(self.root / 'localllmchat.py'))
+            c.execute('project ' + str(self.root / 'service.py'))
             self.assertEqual(c.settings.docker_context, 'another')
             c.execute('context auto')
             self.assertIsNone(c.settings.docker_context)
@@ -10337,7 +10337,7 @@ def self_test() -> bool:
 
         def test_preflight_rejects_compose_syntax_before_approval(self):
             OutputManager(self.root).write(self.config()[1])
-            c = Console(Settings(target_for(str(self.root / 'localllmchat.py'))))
+            c = Console(Settings(target_for(str(self.root / 'service.py'))))
             with patch('shutil.which', return_value='/usr/bin/docker'), \
                  patch.object(EnvironmentDoctor, '_probe', side_effect=[
                      (True, 'Compose OK'), (True, 'Engine OK'), (False, 'invalid YAML')]):
@@ -10347,7 +10347,7 @@ def self_test() -> bool:
 
         def test_remote_up_does_not_probe_local_ports(self):
             OutputManager(self.root).write(self.config(Mode.LLMOPS)[1])
-            c = Console(Settings(target_for(str(self.root / 'localllmchat.py')),
+            c = Console(Settings(target_for(str(self.root / 'service.py')),
                                  mode=Mode.LLMOPS, docker_context='remote-ssh'))
             with patch('shutil.which', return_value='/usr/bin/docker'), \
                  patch.object(EnvironmentDoctor, '_probe', return_value=(True, 'ok')), \
@@ -10371,7 +10371,7 @@ def self_test() -> bool:
 
         def test_diagnose_reports_actionable_health_without_logs(self):
             OutputManager(self.root).write(self.config()[1])
-            c = Console(Settings(target_for(str(self.root / 'localllmchat.py'))))
+            c = Console(Settings(target_for(str(self.root / 'service.py'))))
             with patch.object(DockerAdapter, 'verify', return_value=(False, [
                      'app: NOT READY (state=exited, health=n/a, exit=1)'])), \
                  patch('subprocess.run', side_effect=AssertionError('read-only diagnose should not run logs')), \
@@ -10381,8 +10381,8 @@ def self_test() -> bool:
             self.assertIn('exited', captured.getvalue())
 
         def test_offline_audit_warning_for_unpinned_packages(self):
-            (self.root / 'localllmchat.py').write_text('import httpx\n')
-            target = target_for(str(self.root / 'localllmchat.py'))
+            (self.root / 'service.py').write_text('import httpx\n')
+            target = target_for(str(self.root / 'service.py'))
             plan = Planner().build(Settings(target, Mode.GENAI, dependency_mode='infer'),
                                    Inspector().inspect(target))
             OutputManager(self.root).write(Renderer().files(plan))
@@ -10407,13 +10407,13 @@ def self_test() -> bool:
             OutputManager(self.root).write(self.config()[1])
             with patch('shutil.which', return_value=None), \
                  patch('sys.stdout', new_callable=io.StringIO) as captured:
-                code = main(['audit', str(self.root / 'localllmchat.py')])
+                code = main(['audit', str(self.root / 'service.py')])
             self.assertEqual(code, 0)
             self.assertIn('offline deployment audit', captured.getvalue())
 
         def test_cli_context_rejects_injection(self):
             with patch('sys.stderr', new_callable=io.StringIO) as stderr:
-                code = main(['preview', str(self.root / 'localllmchat.py'),
+                code = main(['preview', str(self.root / 'service.py'),
                              '--docker-context', '../oops'])
             self.assertEqual(code, 2)
             self.assertIn('Invalid Docker context', stderr.getvalue())
@@ -10467,7 +10467,7 @@ def self_test() -> bool:
             self.assertIn('job YES', files['INSTRUCTIONS.txt'])
 
         def test_generic_web_contract_requires_port(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             with self.assertRaisesRegex(OpsError, 'need a port'):
                 Planner().build(Settings(target, execution_kind='web'), Inspector().inspect(target))
             plan = Planner().build(Settings(target, port=8502, execution_kind='web'), Inspector().inspect(target))
@@ -10477,7 +10477,7 @@ def self_test() -> bool:
             self.assertIn('restart: "unless-stopped"', output)
 
         def test_unknown_kind_and_conflicting_web_kind_rejected(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             with self.assertRaisesRegex(OpsError, 'Execution kind'):
                 Planner().build(Settings(target, execution_kind='foo'), Inspector().inspect(target))
             (self.root / 'api.py').write_text('from fastapi import FastAPI\napp = FastAPI()\n')
@@ -10539,7 +10539,7 @@ def self_test() -> bool:
             self.assertIsNone(run.call_args.kwargs['timeout'])
 
         def test_job_command_rejects_web_contract_before_docker(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             plan = Planner().build(Settings(target, port=8081, execution_kind='web'), Inspector().inspect(target))
             OutputManager(self.root).write(Renderer().files(plan))
             console = Console(Settings(target, execution_kind='batch'))
@@ -10549,7 +10549,7 @@ def self_test() -> bool:
 
         def test_cli_kind_preview(self):
             with patch('sys.stdout', new_callable=io.StringIO) as output:
-                code = main(['preview', str(self.root / 'localllmchat.py'), '--kind', 'interactive'])
+                code = main(['preview', str(self.root / 'service.py'), '--kind', 'interactive'])
             self.assertEqual(code, 0)
             self.assertIn('Execution  : interactive', output.getvalue())
 
@@ -10587,7 +10587,7 @@ def self_test() -> bool:
             self.assertIn('Docker CLI', output.getvalue())
 
         def test_kind_setting_back_restores_previous(self):
-            console = Console(Settings(target_for(str(self.root / 'localllmchat.py'))))
+            console = Console(Settings(target_for(str(self.root / 'service.py'))))
             console.execute('kind interactive')
             self.assertEqual(console.settings.execution_kind, 'interactive')
             console.execute('back')
@@ -10679,7 +10679,7 @@ def self_test() -> bool:
         def test_rc3_smoke_refuses_bad_url_before_network(self):
             _, files = self.config()
             # Replan as an explicitly declared generic web server.
-            settings = Settings(target_for(str(self.root / 'localllmchat.py')),
+            settings = Settings(target_for(str(self.root / 'service.py')),
                                 mode=Mode.BASE, port=8123, execution_kind='web')
             OutputManager(self.root).write(Renderer().files(Planner().build(settings, Inspector().inspect(settings.target))))
             with self.assertRaisesRegex(OpsError, 'path'):
@@ -10705,7 +10705,7 @@ def self_test() -> bool:
             thread.start()
             self.addCleanup(server.server_close)
             self.addCleanup(server.shutdown)
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             settings = Settings(target, mode=Mode.BASE, port=8000,
                                 execution_kind='web', host_ports=(('app', server.server_port),))
             OutputManager(self.root).write(Renderer().files(Planner().build(settings, Inspector().inspect(target))))
@@ -10742,8 +10742,8 @@ def self_test() -> bool:
             self.assertEqual(destination.read_text(), 'safe')
 
         def test_rc3_command_override_preserved_as_exec_form(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
-            settings = Settings(target, command_override=('python', '-u', 'localllmchat.py', '--message', 'hello world'))
+            target = target_for(str(self.root / 'service.py'))
+            settings = Settings(target, command_override=('python', '-u', 'service.py', '--message', 'hello world'))
             plan = Planner().build(settings, Inspector().inspect(target))
             files = Renderer().files(plan)
             self.assertIn('"hello world"', files['Dockerfile'])
@@ -10751,13 +10751,13 @@ def self_test() -> bool:
             self.assertNotIn('sh -c', files['Dockerfile'])
 
         def test_rc3_command_override_invalid_newline_refused(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             settings = Settings(target, command_override=('python', 'a\nb'))
             with self.assertRaisesRegex(OpsError, 'exec-form'):
                 Planner().build(settings, Inspector().inspect(target))
 
         def test_rc3_web_custom_health_path_uses_real_http_probe(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             settings = Settings(target, port=8801, execution_kind='web', health_path='/ready')
             plan = Planner().build(settings, Inspector().inspect(target))
             files = Renderer().files(plan)
@@ -10766,19 +10766,19 @@ def self_test() -> bool:
             self.assertIn('"health_path": "/ready"', files['manifest.json'])
 
         def test_rc3_health_path_not_allowed_for_batch(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             settings = Settings(target, health_path='/health')
             with self.assertRaisesRegex(OpsError, 'HTTP health path'):
                 Planner().build(settings, Inspector().inspect(target))
 
         def test_rc3_health_path_never_accepts_external_url(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             settings = Settings(target, port=8443, execution_kind='web', health_path='//external.test')
             with self.assertRaisesRegex(OpsError, 'HTTP health path'):
                 Planner().build(settings, Inspector().inspect(target))
 
         def test_rc3_pin_python_base_digest(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             digest = 'sha256:'+'a'*64
             settings = Settings(target, python_image='python:3.12-slim-bookworm@'+digest)
             plan = Planner().build(settings, Inspector().inspect(target))
@@ -10790,12 +10790,12 @@ def self_test() -> bool:
             self.assertFalse(any('Python base image uses a mutable' in m for m in messages))
 
         def test_rc3_invalid_python_base_digest_is_rejected(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             with self.assertRaisesRegex(OpsError, 'Python image'):
                 Planner().build(Settings(target, python_image='python:3.12@sha256:bad'), Inspector().inspect(target))
 
         def test_rc3_service_images_explicit_digest(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             ref = 'redis:7.4-alpine@sha256:'+'f'*64
             settings = Settings(target, mode=Mode.GENAI, service_images=(('redis', ref),))
             plan = Planner().build(settings, Inspector().inspect(target))
@@ -10804,24 +10804,24 @@ def self_test() -> bool:
             self.assertEqual(json.loads(files['manifest.json'])['runtime']['service_images']['redis'], ref)
 
         def test_rc3_unselected_service_cannot_override_image(self):
-            target = target_for(str(self.root / 'localllmchat.py'))
+            target = target_for(str(self.root / 'service.py'))
             settings = Settings(target, mode=Mode.BASE, service_images=(('redis','redis:7.4'),))
             with self.assertRaisesRegex(OpsError, 'Service image overrides'):
                 Planner().build(settings, Inspector().inspect(target))
 
         def test_rc3_cli_image_options_preview(self):
             with patch('sys.stdout', new_callable=io.StringIO) as output:
-                rc = main(['preview', str(self.root / 'localllmchat.py'), '--kind', 'web',
+                rc = main(['preview', str(self.root / 'service.py'), '--kind', 'web',
                            '--port', '8081', '--health-path', '/ready', '--cmd',
-                           'python -u localllmchat.py', '--python-image',
+                           'python -u service.py', '--python-image',
                            'python:3.12-slim-bookworm'])
             self.assertEqual(rc, 0)
-            self.assertIn('python -u localllmchat.py', output.getvalue())
+            self.assertIn('python -u service.py', output.getvalue())
 
         def test_rc3_console_config_modifications_can_be_undone(self):
-            console = Console(Settings(target_for(str(self.root / 'localllmchat.py'))))
-            console.execute('cmd python -u localllmchat.py')
-            self.assertEqual(console.settings.command_override, ('python','-u','localllmchat.py'))
+            console = Console(Settings(target_for(str(self.root / 'service.py'))))
+            console.execute('cmd python -u service.py')
+            self.assertEqual(console.settings.command_override, ('python','-u','service.py'))
             console.execute('health /ready')
             self.assertEqual(console.settings.health_path, '/ready')
             console.execute('back')
@@ -10830,7 +10830,7 @@ def self_test() -> bool:
             self.assertEqual(console.settings.python_image,'python:3.12-slim-bookworm')
 
         def test_rc3_console_service_image_setting(self):
-            console = Console(Settings(target_for(str(self.root / 'localllmchat.py')), mode=Mode.GENAI))
+            console = Console(Settings(target_for(str(self.root / 'service.py')), mode=Mode.GENAI))
             console.execute('image redis redis:7.4-alpine')
             self.assertEqual(console.settings.service_images, (('redis','redis:7.4-alpine'),))
             console.execute('image redis auto')
