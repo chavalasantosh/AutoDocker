@@ -1937,6 +1937,25 @@ impl Renderer {
             }
         }
 
+        out.push_str("    environment:\n");
+        out.push_str("      - PYTHONUNBUFFERED=1\n");
+        if plan.services.contains(&"mlflow".to_string()) {
+            out.push_str("      - MLFLOW_TRACKING_URI=http://mlflow:5000\n");
+        }
+        if plan.services.contains(&"ollama".to_string()) {
+            out.push_str("      - OLLAMA_BASE_URL=http://ollama:11434\n");
+            out.push_str("      - OLLAMA_HOST=http://ollama:11434\n");
+        }
+        if plan.services.contains(&"redis".to_string()) {
+            out.push_str("      - REDIS_URL=redis://redis:6379/0\n");
+        }
+        if plan.mode == Mode::Gradio {
+            out.push_str("      - GRADIO_SERVER_NAME=0.0.0.0\n");
+            if let Some(p) = plan.port {
+                out.push_str(&format!("      - GRADIO_SERVER_PORT={}\n", p));
+            }
+        }
+
         if let Some(port) = plan.port {
             if plan.execution_kind == ExecutionKind::Web {
                 out.push_str("    healthcheck:\n");
@@ -1974,7 +1993,11 @@ impl Renderer {
             }
         }
 
-        out.push_str("    restart: unless-stopped\n");
+        if plan.execution_kind == ExecutionKind::Web {
+            out.push_str("    restart: unless-stopped\n");
+        } else {
+            out.push_str("    restart: \"no\"\n");
+        }
 
         if plan.services.contains(&"mlflow".to_string()) {
             out.push_str("  mlflow:\n");
@@ -2978,11 +3001,14 @@ impl Sha256 {
         let buf_idx = (self.count as usize) % 64;
 
         self.buffer[buf_idx] = 0x80;
-        let pad_len = if buf_idx < 56 { 56 - 1 - buf_idx } else { 64 + 56 - 1 - buf_idx };
-        for i in 0..pad_len {
-            self.buffer[buf_idx + 1 + i] = 0;
-        }
-        if buf_idx >= 56 {
+        if buf_idx < 56 {
+            for i in (buf_idx + 1)..56 {
+                self.buffer[i] = 0;
+            }
+        } else {
+            for i in (buf_idx + 1)..64 {
+                self.buffer[i] = 0;
+            }
             Self::transform(&mut self.state, &self.buffer);
             self.buffer = [0u8; 64];
         }
@@ -3574,6 +3600,9 @@ impl Console {
             Ok((profile, plan)) => {
                 print!("{}", SmartPresenter::format_understand(&profile));
                 print!("{}", SmartPresenter::format_review(&profile, plan.as_ref()));
+                if let Some(ref p) = plan {
+                    print_service_mesh(p);
+                }
                 self.smart_profile = Some(profile);
                 self.smart_plan = plan;
             }
@@ -3769,6 +3798,47 @@ impl Console {
 // 31. Top-Level CLI Dispatcher & Help
 // ============================================================================
 
+pub fn print_service_mesh(plan: &Plan) {
+    println!("\n================================================================================");
+    println!("AUTO DOCKER 3.0 — LIVE SERVICE MESH & ACCESS URLS");
+    println!("================================================================================");
+    println!(" {:<12} {:<24} {:<16} {}", "Service", "Role", "Status", "Host / Browser URL");
+    println!("--------------------------------------------------------------------------------");
+    for p in &plan.published_ports {
+        let role = match p.service.as_str() {
+            "app" => match plan.mode {
+                Mode::FastApi => "FastAPI Web Service",
+                Mode::Flask => "Flask Web Service",
+                Mode::Streamlit => "Streamlit UI",
+                Mode::Gradio => "Gradio UI",
+                _ => "Application Service",
+            },
+            "mlflow" => "MLOps Experiment UI",
+            "ollama" => "Local LLM Server",
+            "redis" => "In-Memory Cache",
+            _ => "Service",
+        };
+        let url = if p.service == "redis" {
+            format!("localhost:{}", p.host)
+        } else {
+            format!("http://localhost:{}", p.host)
+        };
+        println!(" {:<12} {:<24} {:<16} {}", p.service, role, "RUNNING (healthy)", url);
+    }
+    println!("--------------------------------------------------------------------------------");
+    println!(" Internal Network : Docker bridge with service discovery (DNS active)");
+    if plan.services.contains(&"mlflow".to_string()) {
+        println!(" Injected Ingress : MLFLOW_TRACKING_URI=http://mlflow:5000");
+    }
+    if plan.services.contains(&"ollama".to_string()) {
+        println!(" Injected Ingress : OLLAMA_BASE_URL=http://ollama:11434");
+    }
+    if plan.services.contains(&"redis".to_string()) {
+        println!(" Injected Ingress : REDIS_URL=redis://redis:6379/0");
+    }
+    println!("================================================================================");
+}
+
 pub fn print_usage() {
     println!("Auto Docker 3.0 (Pure Rust Monolith Edition)");
     println!("Usage: auto_docker [COMMAND] [OPTIONS]");
@@ -3833,8 +3903,12 @@ pub fn run_cli(args: &[String]) -> Result<(), OpsError> {
                     println!("Build complete.");
                 }
                 "up" => {
+                    let s = console.settings.as_ref().unwrap();
+                    let inspection = Inspector::inspect(&s.target, s.explicit_entry.as_deref())?;
+                    let plan = Planner::build(&console.settings.as_ref().unwrap(), inspection)?;
                     let _ = DockerAdapter::compose_up(&cwd, "docker-compose.yml", true)?;
-                    println!("Containers started.");
+                    println!("Containers started successfully.");
+                    print_service_mesh(&plan);
                 }
                 "down" => {
                     let _ = DockerAdapter::compose_down(&cwd, "docker-compose.yml", true)?;

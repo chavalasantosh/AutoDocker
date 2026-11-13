@@ -2390,6 +2390,7 @@ class Renderer:
             env["MLFLOW_TRACKING_URI"] = "http://mlflow:5000"
         if "ollama" in plan.services:
             env["OLLAMA_BASE_URL"] = "http://ollama:11434"
+            env["OLLAMA_HOST"] = "http://ollama:11434"
         if "redis" in plan.services:
             env["REDIS_URL"] = "redis://redis:6379/0"
         if "prometheus" in plan.services:
@@ -4408,6 +4409,18 @@ class DockerAdapter:
             hints.append('Inspect logs for service-specific errors; runtime health is not application correctness.')
         return hints
 
+    def get_logs(self, service: str | None = None, tail: int = 25) -> str:
+        """Fetch recent non-color log lines for forensic crash analysis."""
+        args = ['logs', f'--tail={tail}', '--no-color']
+        if service:
+            args.append(service)
+        try:
+            res = subprocess.run(self._compose_command(*args), cwd=self.root,
+                                 capture_output=True, text=True, check=False, timeout=10)
+            return (res.stdout or res.stderr or '').strip()
+        except Exception as exc:
+            return f"(Could not retrieve container logs: {exc})"
+
     def run(self, action: str) -> None:
         if action in {"build", "up", "dryrun", "run", "job"}:
             self.preflight()
@@ -5664,12 +5677,58 @@ class Console:
                     has_unverified = any("no healthcheck" in r for r in rows)
                     if not ok:
                         print("\nDEPLOYMENT DEGRADED: One or more containers failed or exited.")
+                        for r in rows:
+                            print("  " + r)
+                        # Auto-extract crash forensics from the failed container
+                        crash_logs = adapter.get_logs("app", tail=25)
+                        if crash_logs and not crash_logs.startswith("(Could not"):
+                            print("\n" + "=" * 80)
+                            print("AUTOMATED CRASH FORENSICS — SERVICE 'app' LOGS")
+                            print("=" * 80)
+                            print(crash_logs)
+                            print("=" * 80)
+                            if "ModuleNotFoundError" in crash_logs or "ImportError" in crash_logs:
+                                print("💡 ROOT CAUSE: Missing dependency detected.")
+                                print("   Fix: Add the missing package to requirements.txt, or choose option [3] to toggle 'deps infer'.")
                     elif has_unverified:
                         print("\nCONTAINER STARTED — READINESS NOT CONFIRMED (running without explicit healthcheck probe)")
+                        for r in rows:
+                            print("  " + r)
                     else:
                         print("\nPROJECT STARTED — HEALTHY & VERIFIED")
-                    for r in rows:
-                        print("  " + r)
+                        for r in rows:
+                            print("  " + r)
+                        if plan.execution_kind == "batch":
+                            print("\n🎉 BATCH / TRAINING RUN COMPLETED SUCCESSFULLY (Exit Code 0)")
+                            print("   Persistent artifacts, outputs, and model checkpoints preserved.")
+
+                    # Print Live Service Mesh & Access URLs Dashboard
+                    if ok:
+                        published = {p.service: p for p in plan.published_ports}
+                        print("\n" + "=" * 80)
+                        print("AUTO DOCKER 3.0 — LIVE SERVICE MESH & ACCESS URLS")
+                        print("=" * 80)
+                        print(f" {'Service':<12} {'Role':<24} {'Status':<16} {'Host / Browser URL'}")
+                        print("-" * 80)
+                        if plan.port and 'app' in published:
+                            app_role = {"fastapi": "FastAPI Web Service", "flask": "Flask Web Service",
+                                        "streamlit": "Streamlit App", "gradio": "Gradio UI"}.get(plan.inspection.entry.framework, "Application Service")
+                            print(f" {'app':<12} {app_role:<24} {'RUNNING (healthy)':<16} http://localhost:{published['app'].host}")
+                        if "mlflow" in plan.services and "mlflow" in published:
+                            print(f" {'mlflow':<12} {'MLOps Experiment UI':<24} {'RUNNING (healthy)':<16} http://localhost:{published['mlflow'].host}")
+                        if "ollama" in plan.services and "ollama" in published:
+                            print(f" {'ollama':<12} {'Local LLM API Server':<24} {'RUNNING (healthy)':<16} http://localhost:{published['ollama'].host}")
+                        if "redis" in plan.services and "redis" in published:
+                            print(f" {'redis':<12} {'In-Memory Cache':<24} {'RUNNING (healthy)':<16} localhost:{published['redis'].host}")
+                        print("-" * 80)
+                        print(" Internal Network : Docker bridge with service discovery (DNS active)")
+                        if "mlflow" in plan.services:
+                            print(" Injected Ingress : MLFLOW_TRACKING_URI=http://mlflow:5000")
+                        if "ollama" in plan.services:
+                            print(" Injected Ingress : OLLAMA_BASE_URL=http://ollama:11434")
+                        if "redis" in plan.services:
+                            print(" Injected Ingress : REDIS_URL=redis://redis:6379/0")
+                        print("=" * 80)
                     self.smart_stage = "result"
                     return
         raise OpsError("Unrecognized pending operation: " + pending.name)
