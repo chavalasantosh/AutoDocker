@@ -246,7 +246,25 @@ Quick Actions: enter [1-11] to customize, or type 'generate' / 'up'.
 
 ---
 
-## 6. Audit Sign-Off & Verification Verdict
+## 6. Static Analysis Hardening & Audit Bug Fixes
+
+A comprehensive static and security audit identified and eliminated key edge-case vulnerabilities and operational crash bugs:
+
+| Subsystem | Vulnerability / Issue | Root Cause | Implemented Resolution |
+| :--- | :--- | :--- | :--- |
+| **SMART Deploy** | `FrozenInstanceError` crash on manifest-less projects | Direct mutation of `frozen=True` `Settings` in `_stage_smart_deploy` | Replaced with `self._set(dependency_mode="infer")` using `dataclasses.replace`. |
+| **Existing Stacks** | `AttributeError` on port mapping & readiness findings | String ports treated as `PublishedPort` objects; missing `.name` attribute on `ReadinessFinding` | Properly parsed string ports (`host:container`) and used `f.key or f.message`. |
+| **Digest Stability** | Staged approval failure with Grafana | Random `secrets.token_urlsafe` evaluated on every render causing digest mismatches | Replaced with stable environment variable placeholder `${GF_SECURITY_ADMIN_PASSWORD:?...}` avoiding secret leakage. |
+| **Wizard Staging** | `AttributeError` when queuing `check` command | `after=(action,)` initialized as tuple instead of list | Replaced with `after=[action]` and ensured list conversion before appending. |
+| **Session Resilience** | Unhandled exception crash hole in `Console.loop` | Loop only caught `OpsError` and `OSError`; `ValueError`/`KeyError` killed session | Added global `except Exception` handler to preserve user's workbench session. |
+| **Volume Protection** | Unintentional deletion of anonymous volumes | `ResourceCleaner.execute` called `docker rm -f -v` | Removed `-v` flag from container removal to strictly preserve all volumes. |
+| **Command Injection** | Build-time shell injection via malicious dependency filenames | Unquoted `requirements` passed directly to `RUN ... pip install -r {requirements}` | Added regex validation `[A-Za-z0-9_./-]+` and `shlex.quote` sanitization. |
+| **Lock Management** | Stale locks never detected in recovery coordinator | `SmartRecoveryCoordinator` called non-existent `lock.is_stale()` | Added `is_stale()` method to `ProjectLock` wrapping `stale_reason()`. |
+| **Rust Parity** | Mojibake and AST evaluation flaw | `has_main_guard` returned `|| true`; mojibake characters in banner output | Corrected `has_main_guard` to evaluate actual syntax; cleaned mojibake characters. |
+
+---
+
+## 7. Audit Sign-Off & Verification Verdict
 
 | Audit Vector | Standard Evaluated | Result |
 | :--- | :--- | :--- |
@@ -258,3 +276,4 @@ Quick Actions: enter [1-11] to customize, or type 'generate' / 'up'.
 | **Compilation Integrity** | `rustc -D warnings` zero errors; Python 359 tests passed | **VERIFIED** |
 
 **Final Assessment**: **AUTO DOCKER 3.0 IS PRODUCTION-READY FOR GLOBAL ENTERPRISE DEPLOYMENT.**
+

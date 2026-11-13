@@ -862,7 +862,7 @@ def _deps(root: Path) -> str | None:
         for candidate in ("base.txt", "prod.txt", "production.txt", "common.txt", "requirements.txt", "dev.txt"):
             if (req_dir / candidate).is_file():
                 return f"requirements/{candidate}"
-        txts = sorted(f.name for f in req_dir.glob("*.txt") if f.is_file())
+        txts = sorted(f.name for f in req_dir.glob("*.txt") if f.is_file() and re.fullmatch(r"[A-Za-z0-9_.-]+\.txt", f.name))
         if txts:
             return f"requirements/{txts[0]}"
     return None
@@ -2347,9 +2347,12 @@ class Renderer:
         service_images = dict(plan.service_images)
         requirements = i.dependency
         if requirements and requirements.endswith(".txt"):
+            if not re.fullmatch(r"[A-Za-z0-9_./-]+", requirements):
+                raise OpsError(f"Invalid dependency filename: {requirements}")
             # Local -r includes and editable installs must remain available for pip.
+            quoted_req = shlex.quote(requirements)
             setup = ("COPY . /build\n"
-                     f"RUN /opt/venv/bin/python -m pip install --no-cache-dir -r {requirements}")
+                     f"RUN /opt/venv/bin/python -m pip install --no-cache-dir -r {quoted_req}")
         elif requirements in ("pyproject.toml", "setup.py", "setup.cfg"):
             setup = ("COPY . /build\n"
                      "RUN /opt/venv/bin/python -m pip install --no-cache-dir .")
@@ -2552,7 +2555,7 @@ class Renderer:
                 }
             composition["services"]["prometheus"] = prom_svc
             volumes["prometheus-data"] = None
-        graf_password = os.environ.get("GF_SECURITY_ADMIN_PASSWORD") or secrets.token_urlsafe(16)
+        graf_password = os.environ.get("GF_SECURITY_ADMIN_PASSWORD") or "${GF_SECURITY_ADMIN_PASSWORD:?Set GF_SECURITY_ADMIN_PASSWORD in environment}"
         if "grafana" in plan.services:
             grafana_port = published['grafana'].host
             graf_svc: dict[str, Any] = {
@@ -2963,6 +2966,13 @@ class ProjectLock:
             return f"{boot}:{ticks}" if boot and ticks.isdigit() else None
         except (OSError, IndexError, ValueError):
             return None
+
+    def is_stale(self) -> bool:
+        """Return True if the lock is proven stale and safe to recover, False otherwise."""
+        try:
+            return bool(self.stale_reason())
+        except OpsError:
+            return False
 
     def stale_reason(self) -> str:
         """Return a verified safe stale explanation or raise for active/unknown."""
@@ -5013,10 +5023,15 @@ class SmartDecisionEngine:
             ports: list[tuple[str, int, int]] = []
             for s in existing.discovered_services:
                 for p in s.ports:
-                    ports.append((s.name, p.host, p.container))
+                    if isinstance(p, str):
+                        parts = p.split(":")
+                        if len(parts) >= 2 and parts[-2].isdigit() and parts[-1].isdigit():
+                            ports.append((s.name, int(parts[-2]), int(parts[-1])))
+                    elif hasattr(p, "host") and hasattr(p, "container"):
+                        ports.append((s.name, p.host, p.container))
 
             readiness = NativeReadiness.report(resolved_root, docker_context=settings.docker_context if settings else None)
-            missing_vars = [f.name for f in readiness.findings if f.level == "BLOCKER"]
+            missing_vars = [f.key or f.message for f in readiness.findings if f.level == "BLOCKER"]
             if missing_vars:
                 confidence_findings.append(("Environment", "BLOCKED", f"Missing required environment variables: {', '.join(missing_vars)}"))
                 risk_findings.append(f"Unset required environment variables: {', '.join(missing_vars)}")
@@ -6642,7 +6657,7 @@ class Console:
                 digest = self._file_digest(files)
                 self.pending = PendingAction("generate", self.settings, digest=digest,
                                              output_state=tuple(tuple(values) for values in OutputManager(self.settings.target.root).state(files)),
-                                             after=(action,), staged_turn=self.input_turn, requires_distinct_turn=True)
+                                             after=[action], staged_turn=self.input_turn, requires_distinct_turn=True)
                 self.ui_mode = "menu"
                 self.wizard_step = 1
                 return True
@@ -6756,7 +6771,7 @@ class Console:
             audit = DependencyAudit().report(inspection)
             unresolved = audit.required_candidates if audit.required_candidates else audit.possible_missing
             if unresolved:
-                self.settings.dependency_mode = "infer"
+                self._set(dependency_mode="infer")
                 print("\n[SMART Mode] Unmanifested dependencies detected: " + ", ".join(unresolved[:6]))
                 print("             Auto-enabled dependency inference to install required packages in container.")
         digest = DeploymentDigest.compute(
@@ -6792,7 +6807,7 @@ class Console:
             audit = DependencyAudit().report(inspection)
             unresolved = audit.required_candidates if audit.required_candidates else audit.possible_missing
             if unresolved:
-                self.settings.dependency_mode = "infer"
+                self._set(dependency_mode="infer")
                 print("\n[SMART Mode] Auto-enabled dependency inference for: " + ", ".join(unresolved[:6]))
         plan = self._plan()
         files = self.renderer.files(plan)
@@ -7095,6 +7110,8 @@ class Console:
             return True
         if self.pending is not None:
             if name == "check" and self.pending.name == "generate":
+                if isinstance(self.pending.after, tuple):
+                    self.pending.after = list(self.pending.after)
                 if "check" not in self.pending.after:
                     self.pending.after.append("check")
                 print("Queued 'check' after generation. Type YES or cancel at auto-docker>.")
@@ -7933,6 +7950,9 @@ class Console:
                 print(f"ERROR: {exc}")
             except (PermissionError, OSError) as exc:
                 print(f"Filesystem error (session still active): {exc}")
+            except Exception as exc:
+                LOG.debug("Unhandled session error: %s", exc, exc_info=True)
+                print(f"ERROR: Operation failure ({type(exc).__name__}: {exc}). Session preserved.")
 
 
 # ---------- Proof gates: deliberately separate simulated tests from Docker evidence ----------
@@ -8813,10 +8833,10 @@ class ResourceCleaner:
         cleaned: list[CleanableResource] = []
         failed: list[tuple[CleanableResource, str]] = []
 
-        # 1. Stop and remove containers
+        # 1. Stop and remove containers (never use -v so anonymous volumes are protected)
         for c in plan.containers:
             cls._run_docker(["stop", "-t", "3", c.id], prefix=prefix, timeout=15)
-            rm_res = cls._run_docker(["rm", "-f", "-v", c.id], prefix=prefix, timeout=15)
+            rm_res = cls._run_docker(["rm", "-f", c.id], prefix=prefix, timeout=15)
             if rm_res.returncode == 0:
                 cleaned.append(c)
             else:

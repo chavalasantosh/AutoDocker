@@ -846,6 +846,7 @@ pub struct DependencyAstVisitor {
     pub type_checking_imports: HashSet<String>,
     pub needs_stdin: bool,
     pub has_app_object: bool,
+    pub has_main_guard_found: bool,
     pub app_object_name: Option<String>,
     pub detected_framework: Option<String>,
 }
@@ -860,7 +861,7 @@ impl DependencyAstVisitor {
         self.required_imports.contains(name) || self.optional_imports.contains(name)
     }
     pub fn has_main_guard(&self) -> bool {
-        self.has_app_object || true
+        self.has_main_guard_found
     }
     pub fn uses_cli_args(&self) -> bool {
         self.has_module("sys") || self.has_module("argparse") || self.has_module("typer") || self.has_module("click")
@@ -896,6 +897,7 @@ impl DependencyAstVisitor {
 
             if trimmed.starts_with("if __name__ == '__main__':") || trimmed.starts_with("if __name__ == \"__main__\":") {
                 in_main_guard = true;
+                self.has_main_guard_found = true;
                 main_indent = indent;
             } else if trimmed.starts_with("if TYPE_CHECKING:") || trimmed.starts_with("if typing.TYPE_CHECKING:") {
                 in_type_checking = true;
@@ -3442,7 +3444,7 @@ impl SmartPresenter {
     pub fn format_home(current_project: Option<&Path>, recent_count: usize, probe: Option<&DockerHostStatus>) -> String {
         let mut out = String::new();
         out.push_str("================================================================================\n");
-        out.push_str("AUTO DOCKER 3.0 SMART Mode â€” Intelligent Containerization\n");
+        out.push_str("AUTO DOCKER 3.0 SMART Mode -- Intelligent Containerization\n");
         out.push_str("================================================================================\n");
         if let Some(proj) = current_project {
             out.push_str(&format!("Active Project : {}\n", proj.display()));
@@ -3610,7 +3612,7 @@ impl Console {
         let mode_str = self.settings.as_ref().map(|s| format!("{:?}", s.mode)).unwrap_or_else(|| "Auto".to_string());
 
         println!("================================================================================");
-        println!("AUTO DOCKER 3.0 (Pure Rust Monolith) â€” Container Infrastructure Workbench");
+        println!("AUTO DOCKER 3.0 (Pure Rust Monolith) -- Container Infrastructure Workbench");
         println!("================================================================================");
         println!("Project   : {}", proj_str);
         println!("Mode      : {} | Docker: {}", mode_str, probe.summary());
