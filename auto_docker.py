@@ -140,6 +140,7 @@ class Candidate:
     needs_stdin: bool = False
     required_imports: frozenset[str] = frozenset()
     optional_imports: frozenset[str] = frozenset()
+    app_var: str = "app"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -791,7 +792,7 @@ def _check_source(path: Path, root: Path) -> Candidate:
         raise OpsError(f"Python file too large to inspect safely: {rel}")
     try:
         tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=rel)
-    except (SyntaxError, UnicodeError) as exc:
+    except (SyntaxError, UnicodeError, RecursionError, MemoryError, ValueError) as exc:
         raise OpsError(f"Cannot parse {rel}: {exc}") from exc
     visitor = DependencyAstVisitor()
     visitor.visit(tree)
@@ -799,11 +800,20 @@ def _check_source(path: Path, root: Path) -> Candidate:
     main_guard = False
     app_object = False
     top_level_app = False
+    app_var_name = "app"
     for top_node in tree.body:
         if isinstance(top_node, (ast.Assign, ast.AnnAssign)):
             targets = top_node.targets if isinstance(top_node, ast.Assign) else [top_node.target]
-            if any(isinstance(t, ast.Name) and t.id == "app" for t in targets):
-                top_level_app = True
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    if t.id == "app":
+                        top_level_app = True
+                        app_var_name = "app"
+                        break
+                    elif t.id in ("api", "application", "server"):
+                        top_level_app = True
+                        app_var_name = t.id
+            if top_level_app:
                 break
     needs_stdin = False
     for node in ast.walk(tree):
@@ -822,7 +832,7 @@ def _check_source(path: Path, root: Path) -> Candidate:
                 needs_stdin = True
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if any(isinstance(t, ast.Name) and t.id == "app" for t in targets):
+            if any(isinstance(t, ast.Name) and t.id in ("app", "api", "application", "server") for t in targets):
                 app_object = True
         elif isinstance(node, ast.If) and isinstance(node.test, ast.Compare):
             # Inspect AST, never execute user Python code.
@@ -850,7 +860,8 @@ def _check_source(path: Path, root: Path) -> Candidate:
         score -= 35
     return Candidate(
         rel, score, frozenset(imports), main_guard, framework, top_level_app, needs_stdin,
-        frozenset(visitor.required_imports), frozenset(visitor.optional_imports)
+        frozenset(visitor.required_imports), frozenset(visitor.optional_imports),
+        app_var=app_var_name
     )
 
 
@@ -2180,11 +2191,12 @@ class Planner:
         # spaces, dashes, or no __init__.py, without executing it during inspection.
         entry_path = Path(entry)
         app_directory = entry_path.parent.as_posix()
+        app_var = getattr(inspection.entry, "app_var", "app") or "app"
         if f == "fastapi":
-            command = ("python", "-m", "uvicorn", f"{entry_path.stem}:app", "--app-dir", app_directory,
+            command = ("python", "-m", "uvicorn", f"{entry_path.stem}:{app_var}", "--app-dir", app_directory,
                        "--host", "0.0.0.0", "--port", str(port))
         elif f == "flask":
-            command = ("python", "-m", "flask", "--app", f"{entry}:app", "run",
+            command = ("python", "-m", "flask", "--app", f"{entry}:{app_var}", "run",
                        "--host", "0.0.0.0", "--port", str(port))
         elif f == "streamlit":
             command = ("python", "-m", "streamlit", "run", entry, "--server.address=0.0.0.0", f"--server.port={port}")
@@ -2297,18 +2309,24 @@ class Planner:
         if len(explicit) != len(set(explicit)):
             raise OpsError('Two explicit host port overrides cannot use the same port.')
         for service, container in specs:
+            num_ports = settings.replicas if (service == "app" and settings.replicas and settings.replicas > 1) else 1
             if service in overrides:
                 host = overrides[service]
                 if not isinstance(host, int) or not (1024 <= host <= 65535):
                     raise OpsError("Host ports must be integers between 1024 and 65535.")
-                if host in used:
-                    raise OpsError(f"Host port {host} is already assigned to a service in this plan.")
-                used.add(host)
+                for offset in range(num_ports):
+                    p = host + offset
+                    if p in used:
+                        raise OpsError(f"Host port {p} is already assigned to a service in this plan.")
+                    used.add(p)
             else:
                 # Reserve explicitly chosen host ports before allocating defaults,
                 # regardless of the order services appear in Compose.
                 host = _choose_port(container, used | set(explicit))
-                used.add(host)
+                while any((host + offset) in (used | set(explicit)) for offset in range(num_ports)):
+                    host = _choose_port(host + 1, used | set(explicit))
+                for offset in range(num_ports):
+                    used.add(host + offset)
             ports.append(PublishedPort(service, host, container))
         persistent_dirs = settings.persistent_dirs
         if not persistent_dirs:
@@ -3861,7 +3879,7 @@ class NativeReadiness:
     MAX_ENV_SIZE = 128 * 1024
     SENSITIVE = re.compile(r'(?:PASS(?:WORD)?|SECRET|TOKEN|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|AUTH|ACCESS[_-]?KEY)', re.I)
     PLACEHOLDER = re.compile(
-        r'^(?:|changeme|change[_-]?me|replace[_-]?me|replace[_-]?this|your[_-].*|'
+        r'^(?:changeme|change[_-]?me|replace[_-]?me|replace[_-]?this|your[_-].*|'
         r'example.*|placeholder.*|<[^>]*>|\[[^\]]*\]|todo.*|password|secret|'
         r'test[_-]?key|xxx+|dummy.*|insert[_-].*|admin123|root)$', re.I)
     REFERENCE = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?])[^}]*)?\}')
@@ -5037,9 +5055,16 @@ class SmartRememberStore:
             }
             existing[canonical] = safe_config
             payload = {"version": 1, "projects": existing}
-            temp_file = cls.STORE_PATH.with_suffix(".tmp")
-            temp_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            temp_file.replace(cls.STORE_PATH)
+            parent_dir = cls.STORE_PATH.parent
+            parent_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=parent_dir, delete=False, mode="w", encoding="utf-8", prefix=".smart_proj_", suffix=".tmp") as tf:
+                tf.write(json.dumps(payload, indent=2))
+                temp_name = tf.name
+            try:
+                os.chmod(temp_name, 0o600)
+            except Exception:
+                pass
+            Path(temp_name).replace(cls.STORE_PATH)
         except OSError:
             pass
 
@@ -8811,9 +8836,13 @@ class ResourceCleaner:
                     match = r.is_test
             elif mode == "project":
                 if target_ids:
+                    generic_names = {"app", "api", "backend", "tmp", "dev", "test", "src", "bin"}
                     match = (
                         (r.project in target_ids)
-                        or any(r.name.startswith(f"{t}-") or r.name.startswith(f"{t}_") or r.name == t for t in target_ids)
+                        or any(
+                            r.name == t or (t.lower() not in generic_names and len(t) > 3 and (r.name.startswith(f"{t}-") or r.name.startswith(f"{t}_")))
+                            for t in target_ids
+                        )
                     )
             elif mode == "orphan":
                 match = r.is_orphan

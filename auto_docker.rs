@@ -215,7 +215,7 @@ pub fn target_for(raw: &str) -> Result<Target, OpsError> {
         if p_abs.extension().and_then(|e| e.to_str()) == Some("py") {
             (
                 p_abs.parent().unwrap_or(Path::new(".")).to_path_buf(),
-                Some(p_abs.file_name().unwrap().to_str().unwrap().to_string()),
+                p_abs.file_name().map(|n| n.to_string_lossy().to_string()),
             )
         } else if name_lower == "compose.yaml"
             || name_lower == "compose.yml"
@@ -1857,7 +1857,7 @@ impl Planner {
                 ports.push(PublishedPort {
                     service: "app".to_string(),
                     container: p,
-                    host: p + (i as u16),
+                    host: p.saturating_add(i as u16),
                 });
             }
             ports
